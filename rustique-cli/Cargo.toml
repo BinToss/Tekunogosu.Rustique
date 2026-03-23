@@ -6,7 +6,7 @@ authors = ["tekunogosu", "Violet4"]
 
 
 [[bin]]
-name = "rustique-cli"
+name = "rustique"
 path = "src/main.rs"
 
 [dependencies]
