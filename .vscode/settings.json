@@ -1,0 +1,6 @@
+{
+  "rust-analyzer.linkedProjects": [
+    "rustique-cli/Cargo.toml",
+    "rustique-core/Cargo.toml"
+  ]
+}
