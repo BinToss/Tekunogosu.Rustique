@@ -2,5 +2,6 @@
   "rust-analyzer.linkedProjects": [
     "rustique-cli/Cargo.toml",
     "rustique-core/Cargo.toml"
-  ]
+  ],
+  "rust-analyzer.check.command": "clippy"
 }
