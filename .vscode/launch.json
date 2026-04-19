@@ -1,0 +1,98 @@
+{
+  // Use IntelliSense to learn about possible attributes.
+  // Hover to view descriptions of existing attributes.
+  // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+  "version": "0.2.0",
+  "configurations": [
+
+    {
+      "name": "Debug executable 'rustique'",
+      "type": "lldb",
+      "request": "launch",
+      "cargo": {
+        "args": [
+          "run",
+          "--bin=rustique",
+          "--package=rustique-cli"
+        ]
+      },
+      "args": [ ]
+    },
+    {
+      "name": "Debug command 'rustique info floatingcombattext'",
+      "type": "lldb",
+      "request": "launch",
+      "cargo": {
+        "args": [
+          "run",
+          "--bin=rustique",
+          "--package=rustique-cli",
+          "--",
+          "info",
+          "floatingcombattext"
+        ]
+      },
+      "args": [ ]
+    },
+    {
+      "name": "Debug command 'rustique --debug sync'",
+      "type": "lldb",
+      "request": "launch",
+      "cargo": {
+        "args": [
+          "run",
+          "--bin=rustique",
+          "--package=rustique-cli",
+          "--",
+          "--debug",
+          "sync"
+        ]
+      },
+      "args": [ ]
+    },
+    {
+      "name": "Debug command 'rustique --debug list -uc name mod-id version latest-version'",
+      "type": "lldb",
+      "request": "launch",
+      "cargo": {
+        "args": [
+          "run",
+          "--bin=rustique",
+          "--package=rustique-cli",
+          "--",
+          "--debug",
+          "list",
+          "-uc",
+          "name",
+          "mod-id",
+          "version",
+          "latest-version"
+        ]
+      },
+      "args": [ ]
+    },
+    {
+      "name": "Debug unit tests in executable 'rustique'",
+      "type": "lldb",
+      "request": "launch",
+      "cargo": {
+        "args": [
+          "test",
+          "--bin=rustique",
+          "--package=rustique-cli"
+        ]
+      }
+    },
+    {
+      "name": "Debug unit tests in library 'rustique_core'",
+      "type": "lldb",
+      "request": "launch",
+      "cargo": {
+        "args": [
+          "test",
+          "--package=rustique-core"
+        ]
+      }
+    }
+  ]
+}
