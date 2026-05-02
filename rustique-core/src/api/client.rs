@@ -225,7 +225,7 @@ impl ApiClient {
 
         pb.finish_with_message("Fetch Complete");
         for err in error_messages.iter() {
-            error!(err)
+            error!("{}", err);
         }
         Ok(results)
     }
