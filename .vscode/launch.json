@@ -35,7 +35,7 @@
       "args": [ ]
     },
     {
-      "name": "Debug command 'rustique --debug sync'",
+      "name": "Debug command 'rustique -d sync'",
       "type": "lldb",
       "request": "launch",
       "cargo": {
@@ -44,14 +44,14 @@
           "--bin=rustique",
           "--package=rustique-cli",
           "--",
-          "--debug",
+          "-d",
           "sync"
         ]
       },
       "args": [ ]
     },
     {
-      "name": "Debug command 'rustique --debug list -uc name mod-id version latest-version'",
+      "name": "Debug command 'rustique -d list -uc name mod-id version latest-version'",
       "type": "lldb",
       "request": "launch",
       "cargo": {
@@ -60,7 +60,7 @@
           "--bin=rustique",
           "--package=rustique-cli",
           "--",
-          "--debug",
+          "-d",
           "list",
           "-uc",
           "name",
@@ -72,7 +72,7 @@
       "args": [ ]
     },
     {
-      "name": "Debug command 'rustique --debug modpack create --name \\'Forgotten Armory\\' --mpk-id forgottenarmory --mpk-version 1.0.0 --copy-mods'",
+      "name": "Debug command 'rustique -d modpack create --name \\'Forgotten Armory\\' --mpk-id forgottenarmory --mpk-version 1.0.0 --copy-mods'",
       "type": "lldb",
       "request": "launch",
       "cargo": {
@@ -81,7 +81,7 @@
           "--bin=rustique",
           "--package=rustique-cli",
           "--",
-          "--debug",
+          "-d",
           "modpack",
           "create",
           "--name", "Forgotten Armory",
