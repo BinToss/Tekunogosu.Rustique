@@ -1,5 +1,6 @@
 pub trait StrLowerExt{
     fn lower_contains(&self, needle: &str) -> bool;
+    fn lower_eq(&self, needle: &str) -> bool;
     fn contains_str_only(&self, needle: &str) -> bool;
 }
 
@@ -9,6 +10,11 @@ impl StrLowerExt for String {
     fn lower_contains(&self, needle: &str) -> bool {
         let needle_lower = needle.to_lowercase();
         self.to_lowercase().contains(&needle_lower)
+    }
+
+    fn lower_eq(&self, needle: &str) -> bool{
+        let needle_lower = needle.to_lowercase();
+        self.to_lowercase().eq(&needle_lower)
     }
     
     /// Checks if needle is in string. Strips all special characters and whitespaces

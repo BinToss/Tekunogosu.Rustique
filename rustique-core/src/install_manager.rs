@@ -155,9 +155,9 @@ pub async fn install_manager(
                             let filtered_deps: HashMap<_, _> = mod_info.dependencies
                                 .into_iter()
                                 .filter(|(dep_id, _)| {
-                                    !dep_id.lower_contains("game")
-                                        && !dep_id.lower_contains("creative")
-                                        && !dep_id.lower_contains("survival")
+                                    !dep_id.lower_eq("game")
+                                        && !dep_id.lower_eq("creative")
+                                        && !dep_id.lower_eq("survival")
                                         && !seen_mod_ids.contains(dep_id.to_lowercase().as_str())
                                 }).collect();
 
