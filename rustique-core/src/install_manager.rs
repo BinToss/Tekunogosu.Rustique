@@ -11,7 +11,7 @@ use comfy_table::{Attribute, Color};
 use futures::stream::{self, StreamExt};
 use indicatif::MultiProgress;
 use tracing::{debug, error, info};
-use crate::config::config_manager::get_config;
+use crate::config::config_manager::{get_config, Package};
 use crate::consts::FILE_MODINFO_JSON;
 use crate::information_utils::notice;
 use crate::sync_structs::ModSyncInfo;
@@ -202,21 +202,39 @@ pub async fn resolve_dependencies(
                     &api_mod.mod_json.mod_id.clone().to_string()
                 };
 
-                let pkg = config.pkg.iter().find(|p| p.mod_id.eq(mod_id));
+                let pkg = match config.pkg.iter().find(|p| p.mod_id.eq(mod_id)) {
+                    Some(p) => p.clone(),
+                    _ => {Package::default()}
+                };
 
-                let (version, url, _, _) = if let Some(mod_pkg) = pkg {
-                    // println!("Parse_pinned_version {:?}", mod_pkg);
-                    match parse_pinned_version(&api_mod.mod_json.releases, &mod_pkg.clone(), config.pinned_game_version.as_str(), config.allow_unstable) {
+                let (version, url, _, _) =
+                    match parse_pinned_version(&api_mod.mod_json.releases,
+                                               &pkg.clone(),
+                                               config.pinned_game_version.as_str(),
+                                               config.allow_unstable) {
                         Ok(pv) => pv,
                         Err(e) => {
                             notice(format!("Unable to locate compatible versions for {} -- {}", dep_id, e), Some(Color::Red), vec![Attribute::Bold]);
                             continue;
                         }
-                    }
-                } else {
-                    // println!("parse_latest_version");
-                    parse_latest_version(&api_mod.mod_json.releases)
                 };
+
+                info!("Resolving deps for {url} {version}");
+
+
+                // let (version, url, _, _) = if let Some(mod_pkg) = pkg {
+                //     // println!("Parse_pinned_version {:?}", mod_pkg);
+                //     match parse_pinned_version(&api_mod.mod_json.releases, &mod_pkg.clone(), config.pinned_game_version.as_str(), config.allow_unstable) {
+                //         Ok(pv) => pv,
+                //         Err(e) => {
+                //             notice(format!("Unable to locate compatible versions for {} -- {}", dep_id, e), Some(Color::Red), vec![Attribute::Bold]);
+                //             continue;
+                //         }
+                //     }
+                // } else {
+                //     // println!("parse_latest_version");
+                //     parse_latest_version(&api_mod.mod_json.releases)
+                // };
 
                 // println!("Trying to download {} from {}", version, url);
 
@@ -251,6 +269,8 @@ pub async fn install_manager(
     mod_dir: impl PathRef,
     mods_requested: Vec<Install>,
     installed_mods: BTreeMap<ModID, ModSyncInfo>) -> Result<Vec<Installed>, RustiqueError> {
+
+    info!("Install manager called");
 
     let mod_dir = mod_dir.as_ref();
     let client = ApiClient::new();

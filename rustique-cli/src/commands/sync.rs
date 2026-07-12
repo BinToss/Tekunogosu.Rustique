@@ -40,7 +40,6 @@ pub async fn sync<V: AsRef<[Package]>>(mod_dir: impl PathRef, quiet: bool, pin_v
     let start_time = Instant::now();
     let config = get_config().read().await;
     daily_file_syncs(false).await?;
-    game_version_sync(false).await?;
 
     // notice(format!("Syncing {}...", mod_dir.display().fg::<Magenta>()), Option::from(comfy_table::Color::Yellow), vec![Attribute::Bold]);
     if !quiet {
@@ -94,20 +93,20 @@ pub async fn sync<V: AsRef<[Package]>>(mod_dir: impl PathRef, quiet: bool, pin_v
         daily_file_syncs(true).await?;
     }
     
-    let game_version_sync_file = config_path.join(FILE_GAME_VERSION_SYNC);
-    let game_version_sync_data = match parse_json_file::<GameVersionSync>(&game_version_sync_file).await {
-        Ok(json) => json,
-        Err(e) => {
-            info!("game version sync Error: {e}");
-            game_version_sync(true).await?
-        }
-    };
-    
-    let game_version_time = config.sync_latest_game_version_file_every;
-    if timestamp_older_than(game_version_time, &game_version_sync_data.last_sync) {
-        // update the database
-        game_version_sync(true).await?;
-    }
+    // let game_version_sync_file = config_path.join(FILE_GAME_VERSION_SYNC);
+    // let game_version_sync_data = match parse_json_file::<GameVersionSync>(&game_version_sync_file).await {
+    //     Ok(json) => json,
+    //     Err(e) => {
+    //         info!("game version sync Error: {e}");
+    //         game_version_sync(true).await?
+    //     }
+    // };
+    //
+    // let game_version_time = config.sync_latest_game_version_file_every;
+    // if timestamp_older_than(game_version_time, &game_version_sync_data.last_sync) {
+    //     // update the database
+    //     game_version_sync(true).await?;
+    // }
      
 
     let installed_mods = extract_all_mods_metadata(mod_dir, false).await?;
@@ -293,57 +292,3 @@ pub async fn daily_file_syncs(force: bool) -> Result<ModsSearchFile, RustiqueErr
 
     Ok(file_data)
 }
-
-pub async fn game_version_sync(force: bool) -> Result<GameVersionSync, RustiqueError> {
-  
-    let start_time = Instant::now();
-    let config = get_config().read().await;
-    
-    let file = Config::get_path().join(FILE_GAME_VERSION_SYNC);
-    info!("{} {}","Game version sync file path:".green(), file.to_string_lossy().yellow());
-    // if the file doesn't exit, create it 
-    // otherwise check if its time to do update
-    
-    let mut file_data = if file.exists() {
-        match parse_json_file::<GameVersionSync>(&file).await {
-            Ok(json) => json,
-            Err(e) => {
-                error!("Game version sync file parse error: {}", e);
-                // delete the file and recreate it
-                tokio::fs::remove_file(&file).await?;
-                GameVersionSync::new()
-            }
-        }
-    } else {
-        GameVersionSync::new()
-    };
-    
-    let sync_time = config.sync_latest_game_version_file_every;
-    
-    if file_data.game_versions.is_empty() || force || timestamp_older_than(sync_time, &file_data.last_sync){
-        notice("Syncing latest game versions..", Some(Color::Yellow), vec![Attribute::Bold]);
-        
-        let client = ApiClient::new();
-        let gvs = client.fetch_game_versions().await?;
-        file_data.game_versions = gvs.into_iter().collect();
-        file_data.last_sync = get_current_time();
-        
-        let json = prettify(&file_data, "Game Version Sync")?;
-        
-        write_json_file(&file, json, &Config::get_path()).await?;
-
-        info!("{}", "Mods Search Sync file written successfully".green());
-        
-    }
-    
-    
-     if config.show_execution_time && force {
-        elapsed_footer(start_time, "Game Version Sync");
-    } 
-    
-    Ok(file_data)
-}
-
-
-
-

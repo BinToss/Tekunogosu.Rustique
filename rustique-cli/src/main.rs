@@ -23,7 +23,7 @@ use crate::commands::info::info;
 use crate::commands::install::{install_cmd, install_missing_deps};
 use crate::commands::list::cmd_list;
 use crate::commands::search::search;
-use crate::commands::sync::{daily_file_syncs, game_version_sync};
+use crate::commands::sync::daily_file_syncs;
 use crate::logging::{VerboseLevel, init_logging};
 use crate::modpack::modpack_commands::parse_modpack_commands;
 use crate::updater::update_manager;
@@ -161,16 +161,19 @@ async fn async_main() {
                     true,
                     ErrorMsgFn::Error,
                 );
-            } else if args.sync_game_versions {
-                handle_err_result(
-                    game_version_sync(args.sync_game_versions).await,
-                    "Failed calling sync_game_version",
-                    true,
-                    ErrorMsgFn::Error,
-                );
             } else {
                 handle_sync_call(&mod_dir, false).await;
             }
+            // else if args.sync_game_versions {
+            //     handle_err_result(
+            //         game_version_sync(args.sync_game_versions).await,
+            //         "Failed calling sync_game_version",
+            //         true,
+            //         ErrorMsgFn::Error,
+            //     );
+            // } else {
+            //     handle_sync_call(&mod_dir, false).await;
+            // }
         }
         Commands::List(args) => {
             if args.game_versions.is_some() {
