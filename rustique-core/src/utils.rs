@@ -25,6 +25,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{debug, error, info, warn};
 use crate::symlink_manager::SymlinkManager;
 use crate::sync_structs::{GameVersionSync, ModSyncInfo};
+use crate::traits::string_ext::StrLowerExt;
 
 pub fn get_current_time() -> String {
     let datetime: DateTime<Utc> = Utc::now();
@@ -291,9 +292,9 @@ pub fn gather_missing_dependencies<V: AsRef<[ModID]>>(
                 .dependencies
                 .iter()
                 .filter_map(|(mod_id, version)| {
-                    if !mod_id.contains("game")
-                        && !mod_id.contains("survival")
-                        && !mod_id.contains("creative")
+                    if !mod_id.lower_eq("game")
+                        && !mod_id.lower_eq("survival")
+                        && !mod_id.lower_eq("creative")
                         && !id_vec.contains(mod_id)
                     {
                         Some(Install {
