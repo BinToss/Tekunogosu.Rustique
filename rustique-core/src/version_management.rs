@@ -278,7 +278,8 @@ fn return_version_results(result: Option<LatestVersionFound>) -> (ModVersion, Do
 pub fn compare_versions(pinned_version: &str, other_version: &str) -> Result<bool, RustiqueError> {
     // info!("Doing the compare_and_parse_versions");
     let x = VersionReq::parse(pinned_version).map_err(|e| RustiqueError::SimpleError(format!("Failed parsing pinned version in compare_and_parse {e}")))?;
-    let y = Version::parse(other_version).map_err(|e| RustiqueError::SimpleError(format!("Failed parsing pinned version in compare_and_parse {e}")))?;
+    // lenient parse here, mod authors write versions like 1.2 or 1.2.3.4 and strict semver chokes on them
+    let y = parse_version(other_version)?;
 
     Ok(x.matches(&y))
 }

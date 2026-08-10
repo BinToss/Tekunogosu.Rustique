@@ -24,35 +24,40 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-musl
             binary_name: rustique-cli
+            release_name: rustique
             asset_name: rustique-linux-x86_64
             rustflags: ""
-            
+
 #          - os: ubuntu-latest
 #            target: aarch64-unknown-linux-musl
-#            binary_name: Rustique
+#            binary_name: rustique-cli
+#            release_name: rustique
 #            asset_name: rustique-linux-arm64
 #            rustflags: "-C linker=aarch64-linux-gnu-gcc"
 
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             binary_name: rustique-cli.exe
+            release_name: rustique.exe
             asset_name: rustique-windows-x86_64
             rustflags: "-C link-args=/SUBSYSTEM:CONSOLE"
 
 #          - os: macos-latest
 #            target: x86_64-apple-darwin
 #            binary_name: rustique-cli
+#            release_name: rustique
 #            asset_name: rustique-macos-x86_64
 #            rustflags: ""
 #
 #          - os: macos-latest
 #            target: aarch64-apple-darwin
 #            binary_name: rustique-cli
+#            release_name: rustique
 #            asset_name: rustique-macos-arm64
 #            rustflags: ""
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7
 
     - name: Install Rust
       uses: dtolnay/rust-toolchain@nightly
@@ -76,13 +81,21 @@ jobs:
       env:
         RUSTFLAGS: ${{ matrix.rustflags }}
       run: cargo build --release --target ${{ matrix.target }} --package rustique-cli
-    
-    # Upload the ZIP artifacts only
-    - name: Upload ZIP artifact
-      uses: actions/upload-artifact@v4
+
+    # Cargo names the binary after the workspace member, so we get rustique-cli.
+    # Rename it here instead of at release time so the build artifacts are correct too,
+    # otherwise anything pulled from the Actions run page still has the old name
+    - name: Rename binary to rustique
+      shell: bash
+      run: |
+        cd target/${{ matrix.target }}/release
+        mv "${{ matrix.binary_name }}" "${{ matrix.release_name }}"
+
+    - name: Upload artifact
+      uses: actions/upload-artifact@v7
       with:
         name: ${{ matrix.asset_name }}
-        path: target/${{ matrix.target }}/release/${{ matrix.binary_name }}
+        path: target/${{ matrix.target }}/release/${{ matrix.release_name }}
         if-no-files-found: error
 
   release:
@@ -92,29 +105,29 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: release-artifacts
 
+      # The binaries were already renamed in the build job, so this just zips each
+      # artifact dir up under its platform name. The self updater looks for a file called
+      # rustique (or rustique.exe) at the root of the zip, so don't nest anything in here
       - name: Create platform-specific archives
         run: |
           mkdir -p archives
           cd release-artifacts
           for dir in */; do
             platform=$(basename "$dir")
-            cd "$dir"
-            if [[ "$platform" == *"windows"* ]]; then
-              mv rustique-cli.exe rustique.exe
-              zip -9 "../../archives/${platform}.zip" *.exe
-            else
-              mv rustique-cli rustique
-              zip -9 "../../archives/${platform}.zip" *
-            fi
-            cd ..
+            (cd "$dir" && zip -9 "../../archives/${platform}.zip" *)
+          done
+          echo "Archive contents:"
+          for z in ../archives/*.zip; do
+            echo "== $z"
+            unzip -l "$z"
           done
 
       - name: Create Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: archives/*
           draft: true

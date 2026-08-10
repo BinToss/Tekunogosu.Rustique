@@ -532,7 +532,9 @@ pub fn split_modid_version(mod_id_str: impl StrRef) -> (ModID, Option<ModVersion
             }
         };
 
-        return (modid.to_string(), Some(p_ver.to_string()));
+        // lowercase here same as the no-version branch below does. Everything downstream keys
+        // off lowercase ids, and authors put uppercase in their modinfo.json all the time
+        return (modid.to_lowercase(), Some(p_ver.to_string()));
     }
 
     (mod_id_str.as_ref().to_string().to_lowercase(), None)

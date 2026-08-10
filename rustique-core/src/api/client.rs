@@ -138,7 +138,7 @@ impl ApiClient {
         debug!("Mods return text:  {:?}", text);
         
         let parsed: Mod = serde_json::from_str(&text).map_err(|e| RustiqueError::SimpleError(e.to_string()))
-            .map_err(|e| RustiqueError::SimpleError(format!("API return 404 for {}, its likely the api does not recognize the string form of the id (assuming this was the string form): {}", mod_id, e)))?;
+            .map_err(|e| RustiqueError::SimpleError(format!("API return 404 for {}, either the mod doesnt exist or the api does not recognize the string form of the id (assuming this was the string form): {}", mod_id, e)))?;
         debug!("Parsed {:?}", parsed);
 
         Ok(parsed)

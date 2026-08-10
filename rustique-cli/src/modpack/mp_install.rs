@@ -14,6 +14,7 @@ use rustique_core::consts::FILE_MODINFO_JSON;
 use rustique_core::information_utils::{command_output, display_table, elapsed_footer, notice};
 use rustique_core::install_manager::{Install, install_manager, Installed};
 use rustique_core::rustique_errors::RustiqueError;
+use rustique_core::sync_structs::ModSyncInfo;
 use rustique_core::utils::{extract_all_mods_metadata, extract_zip_metadata};
 use rustique_core::version_management::{
     parse_download_url_from_version, parse_latest_version, parse_pinned_version,
@@ -161,7 +162,22 @@ pub async fn mp_install(mp_id: ModID, mp_version: Option<ModVersion>) -> Result<
         
         debug!("Need to download {install_mp_mods:#?}");
 
-        let installed = install_manager(&modpack_mod_path, install_mp_mods, BTreeMap::new()).await?;
+        // reinstalling over a pack dir that already has mods in it shouldn't re-download them.
+        // resolve_dependencies only reads the name and version back out of this, so there's no
+        // reason to burn a full sync worth of api calls just to build the seed
+        let mpk_installed: BTreeMap<ModID, ModSyncInfo> = extract_all_mods_metadata(&modpack_mod_path, false)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(file_name, mod_info)| (mod_info.mod_id.to_lowercase(), ModSyncInfo {
+                file_name,
+                mod_name: mod_info.name.clone(),
+                installed_version: mod_info.version.clone().unwrap_or_default(),
+                .. Default::default()
+            }))
+            .collect();
+
+        let installed = install_manager(&modpack_mod_path, install_mp_mods, mpk_installed).await?;
        
         // Mod saved successfully, add it to the disabled mods so we know its installed
         

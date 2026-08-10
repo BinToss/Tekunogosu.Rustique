@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use comfy_table::{Attribute, CellAlignment, Color};
+use comfy_table::{Attribute, Color};
 use comfy_table::presets::UTF8_HORIZONTAL_ONLY;
 use rustique_core::aliases::{ModID, ModVersion};
 use rustique_core::api::client::ApiClient;
@@ -11,12 +11,12 @@ use rustique_core::utils::{extract_all_mods_metadata, gather_missing_dependencie
 use rustique_core::version_management::{parse_latest_version, parse_pinned_version};
 use tracing::{debug, info};
 use rustique_core::config::config_manager::{get_config, Package};
-use rustique_core::information_utils::{command_output, display_incompatible_mods_constraint, display_installation_results, display_table, notice, rustique_message, CellData, RustiqueMessage};
+use rustique_core::information_utils::{command_output, display_incompatible_mods_constraint, display_installation_results, display_table, notice};
 use rustique_core::traits::ref_ext::PathRef;
 
 // Report if trying install a mod that already exists
 // Use -f to force an installation
-pub async fn install_cmd(mod_dir: impl PathRef, mods_requested: Vec<ModID>, _force: bool) -> Result<(), RustiqueError> {
+pub async fn install_cmd(mod_dir: impl PathRef, mods_requested: Vec<ModID>, force: bool) -> Result<(), RustiqueError> {
     let mod_dir = mod_dir.as_ref();
     info!("install_cmd: {mods_requested:?}");
     
@@ -33,12 +33,36 @@ pub async fn install_cmd(mod_dir: impl PathRef, mods_requested: Vec<ModID>, _for
     let config = get_config().read().await;
     
     let installed_mods = sync_data.rustique_sync.clone();
-    
+
+    // no point burning api calls and a download on something already sitting in the mod dir.
+    // Typing modid@version means they know what they want, so let those through untouched
+    let mut already_installed: Vec<String> = Vec::new();
+    let mod_map: HashMap<ModID, Option<ModVersion>> = if force {
+        mod_map
+    } else {
+        mod_map.into_iter().filter(|(mod_id, requested_version)| {
+            if requested_version.is_none() && installed_mods.contains_key(mod_id) {
+                already_installed.push(mod_id.clone());
+                false
+            } else {
+                true
+            }
+        }).collect()
+    };
+
+    if !already_installed.is_empty() {
+        notice(format!("Already installed, use -f to reinstall: [{}]", already_installed.join("], [")), Some(Color::Yellow), vec![Attribute::Bold]);
+    }
+
+    if mod_map.is_empty() {
+        return Ok(());
+    }
+
     let client = ApiClient::new();
 
     // get the download urls for all requested mods
     let result = client.fetch_mods_parallel(mod_map.keys().cloned().collect()).await?;
-    
+
     if result.is_empty() {
         return Err(SimpleError(format!("Invalid modid {mods_requested:?}")));
     }
@@ -117,14 +141,16 @@ pub async fn install_cmd(mod_dir: impl PathRef, mods_requested: Vec<ModID>, _for
 /// mod_dir_for_req is where the mods_requested will be searched for
 /// all dependencies will be installed to dep_install_path
 pub async fn install_missing_deps<V: AsRef<[ModID]>>(mod_dir_for_req: impl PathRef, mods_requested: V, dep_install_path: impl PathRef) -> Result<(), RustiqueError> {
-    let (mod_dir , mods_requested) = (mod_dir_for_req.as_ref(), mods_requested.as_ref());
+    let (mod_dir , mods_requested, dep_install_path) = (mod_dir_for_req.as_ref(), mods_requested.as_ref(), dep_install_path.as_ref());
     // get all installed mod info
     // retrieve all dependencies
     // send missing ones to install_manager()
 
     let installed_mods = extract_all_mods_metadata(mod_dir, true).await?;
+    // both "what's missing" and the resolver seed get judged against where the deps actually
+    // land, which isn't the same dir we searched for the requesting mods when modpacks call this.
     // silence the sync message because it happens too much during installation.
-    let sync_data = get_sync_data(mod_dir, true).await?.rustique_sync.clone();
+    let sync_data = get_sync_data(dep_install_path, true).await?.rustique_sync;
 
     let mods_map: HashMap<ModID, Option<ModVersion>> = mods_requested.iter().map(split_modid_version).collect();
     let mods_id_vec: Vec<ModID> = mods_map.keys().cloned().collect();

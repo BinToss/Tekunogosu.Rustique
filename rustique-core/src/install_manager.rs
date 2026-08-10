@@ -4,13 +4,13 @@ use crate::api::client::{ApiClient};
 use crate::api::download::download_requested_mods;
 use crate::rustique_errors::RustiqueError;
 use crate::utils::{extract_zip_metadata, split_modid_version};
-use crate::version_management::{parse_latest_version, parse_pinned_version};
+use crate::version_management::{parse_pinned_version};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::PathBuf;
 use comfy_table::{Attribute, Color};
 use futures::stream::{self, StreamExt};
 use indicatif::MultiProgress;
-use tracing::{debug, error, info};
+use tracing::{error, info};
 use crate::config::config_manager::{get_config, Package};
 use crate::consts::FILE_MODINFO_JSON;
 use crate::information_utils::notice;
@@ -92,27 +92,13 @@ pub async fn resolve_dependencies(
     let mut queue: VecDeque<Install> = VecDeque::new();
     let mut all_installed: Vec<Installed> = Vec::new();
 
-    // seed graph with already-installed mods so BFS skips them
-    for (mod_id, sync_info) in installed_mods {
-        let (mod_id, _) = split_modid_version(mod_id);
-        graph.insert(mod_id.to_lowercase(), ResolvedDep {
-            mod_id: mod_id.clone(),
-            mod_name: sync_info.mod_name.clone(),
-            version_to_install: sync_info.installed_version.clone(),
-            download_url: String::new(),
-            requesters: vec![Requester {
-                mod_id: String::from("installed"),
-                required_version: sync_info.installed_version.clone(),
-            }],
-        });
-    }
-
-    // seed queue with initially requested mods
-    // so they are "seen" before the first download pass
+    // seed the queue with what was actually asked for BEFORE seeding the installed mods.
+    // These download no matter what, even if they are already installed, otherwise update
+    // has nothing left to do by the time it gets here
     for install in initial_mods {
         let key = install.mod_id.to_lowercase();
-        if !graph.contains_key(&key) {
-            graph.insert(key, ResolvedDep {
+        if let std::collections::hash_map::Entry::Vacant(e) = graph.entry(key) {
+            e.insert(ResolvedDep {
                 mod_id: install.mod_id.clone(),
                 mod_name: install.mod_name.clone(),
                 version_to_install: install.version_to_install.clone(),
@@ -124,6 +110,27 @@ pub async fn resolve_dependencies(
             });
             queue.push_back(install);
         }
+    }
+
+    // seed graph with everything else already installed so BFS skips them.
+    // A requested mod claimed its key above, don't clobber the version we're installing
+    for (mod_id, sync_info) in installed_mods {
+        let (mod_id, _) = split_modid_version(mod_id);
+        let key = mod_id.to_lowercase();
+        if graph.contains_key(&key) {
+            continue;
+        }
+
+        graph.insert(key, ResolvedDep {
+            mod_id: mod_id.clone(),
+            mod_name: sync_info.mod_name.clone(),
+            version_to_install: sync_info.installed_version.clone(),
+            download_url: String::new(),
+            requesters: vec![Requester {
+                mod_id: String::from("installed"),
+                required_version: sync_info.installed_version.clone(),
+            }],
+        });
     }
 
 
@@ -151,9 +158,9 @@ pub async fn resolve_dependencies(
                             let deps: HashMap<_, _> = mod_info.dependencies
                                 .into_iter()
                                 .filter(|(dep_id, _)| {
-                                    !dep_id.lower_contains("game")
-                                        && !dep_id.lower_contains("creative")
-                                        && !dep_id.lower_contains("survival")
+                                    !dep_id.lower_eq("game")
+                                        && !dep_id.lower_eq("creative")
+                                        && !dep_id.lower_eq("survival")
                                 })
                                 .collect();
                             if deps.is_empty() { None } else { Some(deps) }

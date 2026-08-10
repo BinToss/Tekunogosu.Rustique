@@ -232,7 +232,7 @@ async fn async_main() {
             let config = get_config().read().await;
 
             if !args.mod_ids.is_empty() {
-                match install_cmd(&mod_dir, args.mod_ids.clone(), args.missing_dependencies).await {
+                match install_cmd(&mod_dir, args.mod_ids.clone(), args.force).await {
                     Ok(()) => {
                         handle_sync_call(&mod_dir, false).await;
                     }

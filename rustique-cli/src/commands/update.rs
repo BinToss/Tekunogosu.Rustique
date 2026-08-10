@@ -24,7 +24,16 @@ pub async fn update_mods<V: AsRef<[ModID]>>(mod_dir: impl PathRef, update_mod_id
     let sync_data = get_sync_data(&PathBuf::from(mod_dir), false).await?;
     
     notice("Updating mods...", Option::from(Color::Yellow), vec![Attribute::Bold]);
-    // filter out anything that is a symlink. This means it's a modpack file we don't want to update. 
+
+    // everything physically in the mod dir, symlinks included. resolve_dependencies needs the whole
+    // picture or it re-downloads deps that are already sitting right there. A modpack symlink
+    // satisfies a dependency just as well as a real file does, so it stays in this set
+    let installed_mods: BTreeMap<ModID, ModSyncInfo> = sync_data.rustique_sync
+        .iter()
+        .map(|(mod_id, sync_info)| (split_modid_version(mod_id).0, sync_info.clone()))
+        .collect();
+
+    // filter out anything that is a symlink. This means it's a modpack file we don't want to update.
     let sync_data = sync_data.rustique_sync
         .into_iter()// Consume and transform
         .filter_map(|(mod_id,sync_info)| {
@@ -62,8 +71,7 @@ pub async fn update_mods<V: AsRef<[ModID]>>(mod_dir: impl PathRef, update_mod_id
         return Err(RustiqueError::SimpleError(String::from("No valid update ids or the mod dir is empty..\n\r")))
     }
 
-    let all_installed_mods: BTreeMap<ModID, ModSyncInfo> = mods_to_check_update.clone();
-    debug!("all_installed_mods: {:#?}", all_installed_mods);
+    debug!("installed_mods: {:#?}", installed_mods);
 
     let final_mod_update_list: Vec<Install> = mods_to_check_update
         .into_iter()
@@ -87,7 +95,7 @@ pub async fn update_mods<V: AsRef<[ModID]>>(mod_dir: impl PathRef, update_mod_id
     debug!("final_mod_update_list: {:#?}", final_mod_update_list);
 
 
-    let mods_processed: Vec<Installed> = install_manager(mod_dir, final_mod_update_list.clone(), all_installed_mods).await?;
+    let mods_processed: Vec<Installed> = install_manager(mod_dir, final_mod_update_list, installed_mods).await?;
     
     if config.backup_mods {
         backup_older_files(&mods_processed).await?;        
