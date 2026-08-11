@@ -3,7 +3,6 @@ use rustique_core::utils::{get_expanded_path, pin_version};
 use std::path::PathBuf;
 use std::process::exit;
 use comfy_table::{Attribute, CellAlignment, Color, ContentArrangement, Row, Table};
-use comfy_table::modifiers::UTF8_ROUND_CORNERS;
 use comfy_table::presets::{UTF8_FULL_CONDENSED};
 use semver::VersionReq;
 use tracing::{error, warn};
@@ -361,7 +360,7 @@ async fn list() {
 
     if !config.pkg.is_empty() {
         let mut table = Table::new();
-        table.load_preset(UTF8_FULL_CONDENSED).apply_modifier(UTF8_ROUND_CORNERS).set_content_arrangement(ContentArrangement::Dynamic);
+        table.load_style(UTF8_FULL_CONDENSED.with_rounded_corners()).set_content_arrangement(ContentArrangement::Dynamic);
         let headers = vec![
             prep_cell("Mod ID", Some(CellColor::Green), Some(CellAttr::Bold), None, None),
             prep_cell("Pinned Version", Some(CellColor::Green), Some(CellAttr::Bold), None, Some(CellAlignment::Right)),

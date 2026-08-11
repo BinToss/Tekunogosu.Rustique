@@ -2,7 +2,6 @@
 use rustique_core::search::SortBy;
 use std::str::FromStr;
 use owo_colors::OwoColorize;
-use comfy_table::modifiers::UTF8_ROUND_CORNERS;
 use comfy_table::presets::UTF8_FULL_CONDENSED;
 use comfy_table::{Cell, CellAlignment, ContentArrangement, Row, Table};
 use tracing::{debug, warn};
@@ -78,8 +77,7 @@ pub async fn show_search_table(results: Vec<ModApi>) {
     debug!("search cells: {search_cells:#?}");
 
     let mut table = Table::new();
-    table.load_preset(UTF8_FULL_CONDENSED)
-        .apply_modifier(UTF8_ROUND_CORNERS)
+    table.load_style(UTF8_FULL_CONDENSED.with_rounded_corners())
         .set_content_arrangement(ContentArrangement::Dynamic);
 
     let col_cells: Vec<Cell> = search_headers.iter().map(|(k, v)| {

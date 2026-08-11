@@ -1,8 +1,9 @@
 use std::time::Instant;
 use comfy_table::{Attribute, Cell, CellAlignment, Color, ContentArrangement, Row, Table};
 use comfy_table::ContentArrangement::Dynamic;
-use comfy_table::modifiers::UTF8_ROUND_CORNERS;
+
 use comfy_table::presets::{UTF8_BORDERS_ONLY, UTF8_FULL_CONDENSED, UTF8_HORIZONTAL_ONLY};
+use comfy_table::TableStyle;
 use crate::config::config_structs::{CellAttr, CellColor};
 use crate::install_manager::Installed;
 use crate::traits::ref_ext::StrRef;
@@ -37,8 +38,7 @@ fn strip_ansi(text: &str) -> String {
 
 pub fn rustique_message(rustique_message: RustiqueMessage) {
     let mut table = Table::new();
-    table.load_preset(UTF8_BORDERS_ONLY)
-         .apply_modifier(UTF8_ROUND_CORNERS)
+    table.load_style(UTF8_BORDERS_ONLY.with_rounded_corners())
          .set_content_arrangement(Dynamic);
 
     if rustique_message.header.is_some() {
@@ -83,8 +83,7 @@ pub fn rustique_message(rustique_message: RustiqueMessage) {
 pub fn notice(message: impl StrRef, fg_color: Option<Color>, attributes: Vec<Attribute>) {
     let mut table = Table::new();
     table
-        .load_preset(UTF8_HORIZONTAL_ONLY)
-        .apply_modifier(UTF8_ROUND_CORNERS)
+        .load_style(UTF8_HORIZONTAL_ONLY.with_rounded_corners())
         .set_content_arrangement(Dynamic);
 
     let mut cell = Cell::new(message.as_ref());
@@ -143,7 +142,7 @@ pub fn display_installation_results(mods_processed: Vec<Installed>) {
     let (mut successful, mut failed): (Vec<Installed>, Vec<Installed>) = mods_processed.into_iter().partition(|m| m.success);
 
     let mut s_table = Table::new();
-    s_table.load_preset(UTF8_FULL_CONDENSED).apply_modifier(UTF8_ROUND_CORNERS);
+    s_table.load_style(UTF8_FULL_CONDENSED.with_rounded_corners());
     let mut f_table = s_table.clone();
 
 
@@ -190,10 +189,10 @@ pub fn command_output(option: impl StrRef, val: impl StrRef) -> (CellData, CellD
     )
 }
 
-pub fn display_table(row_data: Vec<(CellData, CellData)>, table_style: Option<&str>) {
+pub fn display_table(row_data: Vec<(CellData, CellData)>, table_style: Option<TableStyle>) {
     let style = table_style.unwrap_or(UTF8_BORDERS_ONLY);
     let mut table = Table::new();
-    table.load_preset(style).set_content_arrangement(ContentArrangement::Dynamic).apply_modifier(UTF8_ROUND_CORNERS);
+    table.load_style(style.with_rounded_corners()).set_content_arrangement(ContentArrangement::Dynamic);
 
     let mut rows: Vec<Row> = Vec::new();
 
@@ -236,8 +235,7 @@ impl CellData {
 pub fn elapsed_footer(start_time: Instant, operation: impl StrRef + std::fmt::Display) {
     let mut table = Table::new();
     table
-        .load_preset(UTF8_HORIZONTAL_ONLY)
-        .apply_modifier(UTF8_ROUND_CORNERS)
+        .load_style(UTF8_HORIZONTAL_ONLY.with_rounded_corners())
         .set_content_arrangement(Dynamic);
 
     let elapsed = format!("{:.2}s", start_time.elapsed().as_secs_f64());

@@ -8,7 +8,6 @@ use rustique_core::rustique_errors::RustiqueError;
 use rustique_core::utils::{extract_all_mods_metadata, gather_dependencies, gather_missing_dependencies, split_modid_version, sanitize_string, format_for_csv, html_parse};
 use rustique_core::version_management::parse_version;
 use owo_colors::OwoColorize;
-use comfy_table::modifiers::UTF8_ROUND_CORNERS;
 use comfy_table::presets::UTF8_FULL;
 use comfy_table::{Cell, CellAlignment, ContentArrangement, Row, Table};
 use std::str::FromStr;
@@ -54,8 +53,7 @@ pub async fn cmd_list(
 
     // setup headers
     let mut table = Table::new();
-    table.load_preset(UTF8_FULL)
-        .apply_modifier(UTF8_ROUND_CORNERS)
+    table.load_style(UTF8_FULL.with_rounded_corners())
         .set_content_arrangement(ContentArrangement::Dynamic);
 
     // if fields set the columns from that
