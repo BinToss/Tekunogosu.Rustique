@@ -131,7 +131,11 @@ impl Tables {
 
 #[derive(Deserialize, Debug, Clone)]
 pub struct TableSection {
+    // both default so a hand edited [table] section that only sets one of them still parses.
+    // Without this a partial section is a hard parse error and takes the whole config down with it
+    #[serde(default = "FlattenMap::new")]
     pub headers: FlattenMap,
+    #[serde(default = "FlattenMap::new")]
     pub cells: FlattenMap,
 }
 

@@ -4,28 +4,25 @@
 use crate::commands::install::install_missing_deps;
 use crate::commands::sync::sync;
 use comfy_table::{Attribute, Color};
-use owo_colors::OwoColorize;
 use rustique_core::aliases::{ModID, ModVersion};
 use rustique_core::api::api_structs::ModInfo;
 use rustique_core::api::client::ApiClient;
 use rustique_core::api::download::download_requested_mods;
 use rustique_core::config::config_manager::{Package, get_config, with_config};
 use rustique_core::consts::FILE_MODINFO_JSON;
-use rustique_core::information_utils::{command_output, display_table, elapsed_footer, notice};
-use rustique_core::install_manager::{Install, install_manager, Installed};
+use rustique_core::information_utils::{command_output, display_incompatible_mods_constraint, display_installation_results, display_table, elapsed_footer, notice};
+use rustique_core::install_manager::{dependency_requirement, install_manager, resolve_installs, Install, InstallRequest, Installed, ResolveFailure, ResolveOptions};
 use rustique_core::rustique_errors::RustiqueError;
 use rustique_core::sync_structs::ModSyncInfo;
-use rustique_core::utils::{extract_all_mods_metadata, extract_zip_metadata};
-use rustique_core::version_management::{
-    parse_download_url_from_version, parse_latest_version, parse_pinned_version,
-};
+use rustique_core::utils::{extract_all_mods_metadata, extract_zip_metadata, is_base_game_dep, pin_version};
+use rustique_core::version_management::{parse_latest_version, parse_pinned_version};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 use std::process::exit;
 
 use std::time::Instant;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info};
 
 pub fn check_if_mp_enabled(mp_id: &ModID, array: &[String]) {
     if array.contains(mp_id) {
@@ -131,38 +128,31 @@ pub async fn mp_install(mp_id: ModID, mp_version: Option<ModVersion>) -> Result<
         }
 
         // grab the mod ids from the modpack
-        let mods = modpack_info.dependencies.keys().cloned().collect();
-        let mod_pkgs: Vec<Package> = modpack_info.dependencies.iter().map(|(id, version)| Package {
-            mod_id: id.clone(),
-            pinned_version: Some(version.clone()),
-        }).collect();
-        
-        info!("MODS: {mods:?}");
-        let deps = client.fetch_mods_parallel(mods).await?;
-        
-        let install_mp_mods: Vec<Install> = deps.iter().filter_map(|(mod_id, mod_api)| {
-            // grab the mod from the modpack so we can actually download the correct version
-            if let Some((mp_mod_id,mp_mod_version)) = modpack_info.dependencies.iter().find(|(dep_mod_id, _) |dep_mod_id.eq(&mod_id)) {
-                let download_url = match parse_download_url_from_version(&mod_api.mod_json.releases, mp_mod_version) {
-                    Ok(download_url) => download_url,
-                    Err(e) => {
-                        warn!("Rustique can't download {}: {}", mp_mod_id.red(), e.red());
-                        return None;
-                    }
-                };
-                
-                Some(Install {
-                    mod_id: mod_id.clone(),
-                    mod_name: mod_api.mod_json.name.clone().unwrap_or_default(),
-                    version_to_install: mp_mod_version.clone(),
-                    download_url,
-                    current_file_path: None,
-                })
-            } else {
-                None
-            }
-        }).collect();
-        
+        let mod_pkgs: Vec<Package> = modpack_info.dependencies.iter()
+            .filter(|(id, _)| !is_base_game_dep(id))
+            .map(|(id, version)| Package {
+                mod_id: id.clone(),
+                pinned_version: Some(version.clone()),
+            }).collect();
+
+        // a pack names the exact build it was made against, so ask for that first. If the author
+        // has since pulled that release, settle for the nearest patch rather than dropping the
+        // mod out of the pack entirely. No game pin and no config pins, the pack decides
+        let requests: Vec<InstallRequest> = modpack_info.dependencies.iter()
+            .map(|(mod_id, version)| InstallRequest::new(mod_id.clone())
+                .with_version(Some(pin_version(version)))
+                .with_fallback(dependency_requirement(version)))
+            .collect();
+
+        let options = ResolveOptions {
+            pinned_game_version: String::new(),
+            allow_unstable,
+            apply_config_pins: false,
+        };
+
+        let (install_mp_mods, failures) = resolve_installs(requests, &client, &options).await?;
+        let pack_failures: Vec<String> = failures.iter().map(ResolveFailure::to_row).collect();
+
         debug!("Need to download {install_mp_mods:#?}");
 
         // reinstalling over a pack dir that already has mods in it shouldn't re-download them.
@@ -185,11 +175,18 @@ pub async fn mp_install(mp_id: ModID, mp_version: Option<ModVersion>) -> Result<
         // Mod saved successfully, add it to the disabled mods so we know its installed
         
         debug!("Successfully installed {installed:#?}");
-        
+
+        // this never got called here, so a modpack install said nothing at all about mods that
+        // didn't make it. One bad mod shouldn't be a silent hole in the pack you just installed
+        display_installation_results(installed);
+
         sync(packs_dir, false, vec![]).await?;
         sync(modpack_mod_path, false, mod_pkgs).await?;
-        
-        
+
+        if !pack_failures.is_empty() {
+            display_incompatible_mods_constraint(pack_failures, "Modpack mods that could not be installed".into());
+        }
+
         display_table(vec![command_output("Successfully installed Modpack:", modpack.mod_name)], None);
         elapsed_footer(start_time, "Modpack Install");
         

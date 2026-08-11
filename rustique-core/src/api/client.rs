@@ -166,7 +166,9 @@ impl ApiClient {
         let pb = ProgressBar::new(valid_ids.len() as u64);
         pb.set_style(
             ProgressStyle::default_bar()
-                .template("{spinner:.green} [{elapsed_precise:.cyan}] [{bar:.cyan/grey:40}] {pos:.green}/{len:.cyan} {msg:.yellow}")
+                // no leading spinner. It renders as nothing once the bar finishes and leaves the
+                // whole line sat one space right of every other progress bar we draw
+                .template("[{elapsed_precise:.cyan}] [{bar:.cyan/grey:40}] {pos:.green}/{len:.cyan} {msg:.yellow}")
                 .unwrap()
                 .progress_chars("█▒░")
         );
@@ -190,7 +192,10 @@ impl ApiClient {
                         Some((mod_id, the_mod))
                     },
                     Err(e) => {
-                        error!("{mod_id} {e}");
+                        // info, not error. This fires mid progress bar and the raw api text
+                        // shredded the display for something the caller reports properly in a
+                        // table afterwards. Run with -v or -d when you want the detail
+                        info!("{mod_id} {e}");
                         pb_clone.set_message(format!("Failed: {}", mod_id.red()));
                         pb_clone.inc(1);
                         None

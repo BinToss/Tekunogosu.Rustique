@@ -25,13 +25,14 @@ use crate::commands::list::cmd_list;
 use crate::commands::search::search;
 use crate::commands::sync::daily_file_syncs;
 use crate::logging::{VerboseLevel, init_logging};
+use crate::commands::arg_structs::modpack_args::ModpackSubCommands;
 use crate::modpack::modpack_commands::parse_modpack_commands;
 use crate::updater::update_manager;
 use crate::updater::update_manager::check_for_update;
 use crate::commands::config::parse_config_args;
 use clap::{CommandFactory, FromArgMatches};
 use clap_complete::{Shell, generate};
-use comfy_table::{Attribute, Color};
+use comfy_table::{Attribute, CellAlignment, Color};
 use commands::sync::sync;
 use commands::update::update_mods;
 use owo_colors::OwoColorize;
@@ -43,7 +44,7 @@ use std::time::Instant;
 use dirs::home_dir;
 use tracing::{debug, error, info, warn};
 use rustique_core::config::config_manager::{get_config, init_config};
-use rustique_core::information_utils::{elapsed_footer, notice};
+use rustique_core::information_utils::{elapsed_footer, notice, rustique_message, CellData, RustiqueMessage};
 use rustique_core::rustique_errors::{handle_err_result, ErrorMsgFn};
 use rustique_core::rustique_options::RustiqueOptions;
 use rustique_core::traits::ref_ext::PathRef;
@@ -124,6 +125,10 @@ async fn async_main() {
             );
             exit(1);
         }
+    } else if needs_mod_dir(&cli.command) && (mod_dir.as_os_str().is_empty() || !mod_dir.exists()) {
+        // rustique_options used to panic here. It hands back nothing now and we say something
+        // the user can act on instead of dumping a backtrace at them
+        no_mod_dir_found();
     }
 
     // Don't use a global here, The RwLock needs to be as local as possible or rustique hangs when its called
@@ -177,7 +182,13 @@ async fn async_main() {
         }
         Commands::List(args) => {
             if args.game_versions.is_some() {
-                let sorted_versions = sorted_game_versions().await;
+                let sorted_versions = match sorted_game_versions().await {
+                    Ok(v) => v,
+                    Err(e) => {
+                        notice(e.to_string(), Some(Color::Yellow), vec![Attribute::Bold]);
+                        exit(1);
+                    }
+                };
                 let filter_by = &args.game_versions.clone().unwrap_or("1.20".into());
 
                 let versions: Vec<String> = sorted_versions
@@ -334,6 +345,58 @@ async fn async_main() {
             }
         }
     }
+}
+
+/// Commands that actually need somewhere to put mods. Everything else (config, search, the
+/// game downloader, self update) works fine without one, so don't stop those over it.
+fn needs_mod_dir(command: &Commands) -> bool {
+    match command {
+        Commands::Sync(_)
+        | Commands::List(_)
+        | Commands::Update(_)
+        | Commands::Install(_)
+        | Commands::Delete(_) => true,
+
+        // most modpack work happens inside the modpack directories. Only the ones that
+        // reach into the mods folder itself actually need one
+        Commands::Modpack(cmds) => matches!(
+            cmds.subcommand,
+            ModpackSubCommands::Enable(_) | ModpackSubCommands::Disable(_) | ModpackSubCommands::Create(_)
+        ),
+
+        _ => false,
+    }
+}
+
+/// Nothing usable came back from either the platform defaults or the config file. Tell the user
+/// what we looked for and how to point us at the right place, then stop.
+fn no_mod_dir_found() -> ! {
+    let looked_at = if cfg!(windows) {
+        "%APPDATA%\\VintagestoryData\\Mods"
+    } else if cfg!(target_os = "macos") {
+        "~/Library/Application Support/VintagestoryData/Mods  or  ~/.config/VintagestoryData/Mods"
+    } else {
+        "~/.config/VintagestoryData/Mods  or  the Flatpak path under ~/.var/app/at.vintagestory.VintageStory"
+    };
+
+    rustique_message(RustiqueMessage {
+        header: Some(CellData::new(
+            "Rustique couldn't find your Vintage Story mods folder".into(),
+            Some(Color::Red), vec![Attribute::Bold], Some(CellAlignment::Center),
+        )),
+        message: vec![
+            CellData::new("Nothing is set in your config, and the usual location doesn't exist on this machine.".into(), Some(Color::Yellow), vec![], Some(CellAlignment::Left)),
+            CellData::new(format!("Looked for: {looked_at}"), Some(Color::Cyan), vec![], Some(CellAlignment::Left)),
+            CellData::default(),
+            CellData::new("Set it once and Rustique will remember:".into(), Some(Color::Yellow), vec![], Some(CellAlignment::Left)),
+            CellData::new("rustique config set -m </path/to/your/mods/folder>".into(), Some(Color::Green), vec![Attribute::Bold], Some(CellAlignment::Left)),
+            CellData::default(),
+            CellData::new("Or point a single command at one:".into(), Some(Color::Yellow), vec![], Some(CellAlignment::Left)),
+            CellData::new("rustique -m </path/to/your/mods/folder> list".into(), Some(Color::Green), vec![Attribute::Bold], Some(CellAlignment::Left)),
+        ],
+    });
+
+    exit(1);
 }
 
 async fn handle_sync_call(mod_dir: impl PathRef, quiet: bool) {

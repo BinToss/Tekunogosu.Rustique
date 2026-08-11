@@ -187,7 +187,7 @@ pub async fn cmd_list(
             
             let file_is_symlink = mod_dir.join(filename).is_symlink();
            
-            let pkg = config.pkg.iter().find(|p| p.mod_id.eq(&mod_info.mod_id));
+            let pkg = config.pkg.iter().find(|p| p.mod_id.eq_ignore_ascii_case(&mod_info.mod_id));
 
             if only_pinned && pkg.is_none() {
                 return None

@@ -33,7 +33,7 @@ prevent_updates = true
 [modpack]
 
 # Modpack file will be downloaded from the mods website to here, at this point they are considered `installed`
-# Once installed you can run `./Rustique mp enable modpack-name`
+# Once installed you can run `./rustique mp enable modpack-name`
 download_dir = "~/.config/rustique/modpacks/downloads"
 
 # This location is for backing up your non-modpacks when enabling a modpack

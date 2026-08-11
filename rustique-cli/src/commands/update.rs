@@ -7,7 +7,7 @@ use std::path::{PathBuf};
 use std::time::Instant;
 use tracing::debug;
 use rustique_core::config::config_manager::with_config;
-use rustique_core::information_utils::{display_installation_results, elapsed_footer, notice};
+use rustique_core::information_utils::{display_incompatible_mods_constraint, display_installation_results, elapsed_footer, notice};
 use rustique_core::sync_structs::ModSyncInfo;
 use rustique_core::traits::ref_ext::PathRef;
 use rustique_core::install_manager::{install_manager, Install, Installed};
@@ -73,13 +73,25 @@ pub async fn update_mods<V: AsRef<[ModID]>>(mod_dir: impl PathRef, update_mod_id
 
     debug!("installed_mods: {:#?}", installed_mods);
 
+    // mods sync couldn't get version info for. Left alone they compare "" against the installed
+    // version, look like an update is waiting every run, and fail on an empty download url
+    let mut no_version_info: Vec<String> = Vec::new();
+
     let final_mod_update_list: Vec<Install> = mods_to_check_update
         .into_iter()
         .filter_map(|(mod_id, mod_sync_info)| {
-           
+
+            if mod_sync_info.latest_known_version.is_empty() {
+                if !mod_id.is_empty() {
+                    no_version_info.push(format!("{mod_id}\nNo version information from the last sync. It may no longer be on the mod site, or nothing matches your pinned constraints."));
+                }
+
+                return None;
+            }
+
             // if mod_id is present in the [[pkg]] section of the config, check if we are allowed to update the mod
-            if mod_sync_info.latest_known_version != mod_sync_info.installed_version 
-                && !mod_id.is_empty() { 
+            if mod_sync_info.latest_known_version != mod_sync_info.installed_version
+                && !mod_id.is_empty() {
                 Some(Install { 
                     mod_id: mod_id.to_lowercase(),
                     mod_name: mod_sync_info.mod_name.clone(),
@@ -93,6 +105,10 @@ pub async fn update_mods<V: AsRef<[ModID]>>(mod_dir: impl PathRef, update_mod_id
     }).collect();
 
     debug!("final_mod_update_list: {:#?}", final_mod_update_list);
+
+    if !no_version_info.is_empty() {
+        display_incompatible_mods_constraint(no_version_info, "Skipped, no version information".into());
+    }
 
 
     let mods_processed: Vec<Installed> = install_manager(mod_dir, final_mod_update_list, installed_mods, false).await?;

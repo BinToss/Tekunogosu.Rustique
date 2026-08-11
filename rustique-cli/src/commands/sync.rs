@@ -179,7 +179,15 @@ pub async fn sync<V: AsRef<[Package]>>(mod_dir: impl PathRef, quiet: bool, pin_v
         ).await?;
 
     let mut no_compatible_mods: Vec<String> = Vec::new();
-    
+
+    // mods the api gave us nothing for. They keep an empty latest_known_version, which update
+    // then reads as "there's a newer version" on every single run, so say so here
+    let not_found: Vec<String> = sync_data.rustique_sync
+        .keys()
+        .filter(|mod_id| !result.contains_key(&split_modid_version(mod_id).0))
+        .map(|mod_id| format!("{mod_id}\nNot found on the mod site. It may have been renamed, removed, or made private."))
+        .collect();
+
     for (mod_id, res_mod) in &result {
 
         // let (mod_id_parsed, _) = &split_modid_version(mod_id);
@@ -188,9 +196,9 @@ pub async fn sync<V: AsRef<[Package]>>(mod_dir: impl PathRef, quiet: bool, pin_v
         let mod_asset_id = res_mod.mod_json.asset_id;
         
         let pkg = if pin_versions.as_ref().is_empty() {
-            config_pkgs.iter().find(|p| p.mod_id.eq(&mod_id)).cloned().unwrap_or_default()
+            config_pkgs.iter().find(|p| p.mod_id.eq_ignore_ascii_case(&mod_id)).cloned().unwrap_or_default()
         } else {
-            pin_versions.as_ref().iter().find(|p| p.mod_id.eq(&mod_id)).cloned().unwrap_or_default()
+            pin_versions.as_ref().iter().find(|p| p.mod_id.eq_ignore_ascii_case(&mod_id)).cloned().unwrap_or_default()
         };
 
         info!("pkg in sync: {:?}", pkg);
@@ -239,6 +247,10 @@ pub async fn sync<V: AsRef<[Package]>>(mod_dir: impl PathRef, quiet: bool, pin_v
                 latest_changelog: changelog,
                 .. Default::default()
             });
+    }
+
+    if !not_found.is_empty() {
+        display_incompatible_mods_constraint(not_found, "Mods that could not be found on the mod site".into());
     }
 
     if !no_compatible_mods.is_empty() {

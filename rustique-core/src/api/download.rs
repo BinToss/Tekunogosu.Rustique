@@ -58,7 +58,9 @@ pub async fn download_requested_mods(mod_dir: &Path, mods_requested: &mut Vec<In
                     installed.clone()
                 }
                 Err(e) => {
-                    warn!("Failed to download mod: {}, {}", mod_request.download_url, e);
+                    // info, not warn. This fires while the progress bars are live and the failure
+                    // already lands in the Failed to Install table. -v or -d for the detail
+                    info!("Failed to download mod: {}, {}", mod_request.download_url, e);
                     if let Some(pb) = bar {
                         let msg = format!("({}) : {}", mod_request.version_to_install, mod_request.mod_name.bright_red());
                         pb.finish_with_message(msg);
@@ -118,12 +120,15 @@ pub async fn download_mod(mod_dir: &Path, download_url: String, api_client: &Api
                 return Ok(file_path);
             },
             Err(e) => {
-                warn!("Download attempt {} failed for {}: {}", attempt, url, e);
+                info!("Download attempt {} failed for {}: {}", attempt, url, e);
 
-                // Clean up any partial downloads
-                if requested_file_path.exists() {
-                    if let Err(clean_err) = tokio::fs::remove_file(&requested_file_path).await {
-                        warn!("Failed to clean up partial download {}: {}", requested_file_path.display(), clean_err);
+                // Clean up the partial download. This has to be the temp file. The final path
+                // is whatever copy of the mod is already installed until the rename succeeds,
+                // so deleting that on a failed retry destroys a perfectly good file
+                let partial = requested_file_path.with_extension("tmp");
+                if partial.exists() {
+                    if let Err(clean_err) = tokio::fs::remove_file(&partial).await {
+                        warn!("Failed to clean up partial download {}: {}", partial.display(), clean_err);
                     }
                 }
 

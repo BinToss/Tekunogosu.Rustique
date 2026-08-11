@@ -70,14 +70,22 @@ pub async fn mp_update(args: MPUpdateArgs) -> Result<(), RustiqueError> {
 
     let installed = match download_requested_mods(&pack_dir, &mut vec![m_install], &client, None).await {
         Ok(i) => {
-            // delete the old file if its named differently from the new
-            // there is only 1 file as we only process 1 modpack at a time
-            if i.first().is_some_and(|e| !e.installed_file_path.eq(&Some(mp_file_path.clone()))) {
-                info!("Deleting old modpack file {}", mp_file_path.display());
-                delete_file(&mp_file_path).await?;
+            // there is only 1 file as we only process 1 modpack at a time, but a join error
+            // upstream can still hand back nothing and unwrapping that panics
+            let Some(installed) = i.into_iter().next() else {
+                return Err(RustiqueError::SimpleError(format!("Nothing came back from downloading {}", &args.mpk_id)));
+            };
+
+            // delete the old file if its named differently from the new. Only once we know the new
+            // one actually landed, a failed download leaves no path and would take the old file
+            if let Some(new_path) = &installed.installed_file_path {
+                if new_path != &mp_file_path {
+                    info!("Deleting old modpack file {}", mp_file_path.display());
+                    delete_file(&mp_file_path).await?;
+                }
             }
 
-            i.first().unwrap().clone()
+            installed
         },
         Err(e) => return Err(e)
     };

@@ -3,7 +3,7 @@ use crate::api::api_structs::{Mod, ModInfo};
 use crate::api::client::{ApiClient};
 use crate::api::download::download_requested_mods;
 use crate::rustique_errors::RustiqueError;
-use crate::utils::{combine_version_reqs, extract_zip_metadata, has_semver_operator, split_modid_version};
+use crate::utils::{combine_version_reqs, extract_zip_metadata, has_semver_operator, is_base_game_dep, split_modid_version};
 use crate::version_management::{parse_pinned_version, parse_version};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::PathBuf;
@@ -13,10 +13,9 @@ use indicatif::MultiProgress;
 use tracing::{debug, error, info};
 use crate::config::config_manager::{with_config, Package};
 use crate::consts::FILE_MODINFO_JSON;
-use crate::information_utils::notice;
+use crate::information_utils::{display_incompatible_mods_constraint, notice};
 use crate::sync_structs::ModSyncInfo;
 use crate::traits::ref_ext::PathRef;
-use crate::traits::string_ext::StrLowerExt;
 
 // install & update both will obtain the info needed to fill this struct
 #[derive(Debug, Clone, Default)]
@@ -86,7 +85,7 @@ pub type DependencyGraph = HashMap<ModID, ResolvedDep>;
 /// the same major.minor is compatible, a different minor usually isn't, so we ask for ~2.3.1.
 /// If they already wrote an operator we take them at their word, and anything unparseable or a
 /// wildcard means they never really pinned it so we leave it open.
-fn dependency_requirement(required_version: &str) -> Option<ModVersion> {
+pub fn dependency_requirement(required_version: &str) -> Option<ModVersion> {
     let required = required_version.trim();
 
     if required.is_empty() || required == "*" {
@@ -106,8 +105,173 @@ fn dependency_requirement(required_version: &str) -> Option<ModVersion> {
     }
 }
 
-/// Resolves one dependency against a single set of conditions. Pulled out so the conflict
-/// fallback below can run the exact same resolution with a different condition.
+/// What a caller wants installed: an id, and optionally a condition the version has to meet.
+#[derive(Debug, Clone)]
+pub struct InstallRequest {
+    pub mod_id: ModID,
+    /// A VersionReq string. None means whatever the config pin and game pin allow
+    pub version_req: Option<ModVersion>,
+    /// Only tried when version_req matches nothing. Modpacks name an exact build and want the
+    /// nearest patch of it when an author pulls that release
+    pub fallback_req: Option<ModVersion>,
+}
+
+impl InstallRequest {
+    pub fn new(mod_id: impl Into<ModID>) -> Self {
+        Self { mod_id: mod_id.into(), version_req: None, fallback_req: None }
+    }
+
+    #[must_use]
+    pub fn with_version(mut self, version_req: Option<ModVersion>) -> Self {
+        self.version_req = version_req;
+        self
+    }
+
+    #[must_use]
+    pub fn with_fallback(mut self, fallback_req: Option<ModVersion>) -> Self {
+        self.fallback_req = fallback_req;
+        self
+    }
+}
+
+/// Why a requested mod didn't make it into the install list. Kept structured rather than
+/// pre-formatted so callers that know more can say more, install knows when a config pin is
+/// the likely culprit and can tell the user how to change it.
+#[derive(Debug, Clone)]
+pub enum ResolveFailure {
+    /// The api gave us nothing at all for this id
+    NotFound(ModID),
+    /// The mod exists, but nothing it publishes satisfies the conditions
+    NoMatchingVersion(ModID, String),
+}
+
+impl ResolveFailure {
+    pub fn mod_id(&self) -> &str {
+        match self {
+            Self::NotFound(mod_id) | Self::NoMatchingVersion(mod_id, _) => mod_id,
+        }
+    }
+
+    /// "\<mod id\>\n\<why\>", the shape `display_incompatible_mods_constraint` renders.
+    pub fn to_row(&self) -> String {
+        match self {
+            Self::NotFound(mod_id) =>
+                format!("{mod_id}\nNot found on the mod site. It may have been renamed, removed, or made private."),
+            Self::NoMatchingVersion(mod_id, reason) => format!("{mod_id}\n{reason}"),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ResolveOptions {
+    pub pinned_game_version: String,
+    pub allow_unstable: bool,
+    /// false when the user forced past their own pins, or for modpacks, which carry the exact
+    /// versions they were built against and shouldn't be second guessed by a global pin
+    pub apply_config_pins: bool,
+}
+
+impl ResolveOptions {
+    /// The usual case, whatever the user has configured.
+    pub async fn from_config() -> Self {
+        let (pinned_game_version, allow_unstable) =
+            with_config(|c| (c.pinned_game_version.clone(), c.allow_unstable)).await;
+
+        Self { pinned_game_version, allow_unstable, apply_config_pins: true }
+    }
+}
+
+/// ANDs the caller's condition together with the user's config pin. Either side may be absent.
+fn merge_condition(requested: Option<&str>, config_pin: Option<&str>) -> Option<ModVersion> {
+    match (requested, config_pin) {
+        (Some(a), Some(b)) => Some(combine_version_reqs(a, b)),
+        (Some(a), None) => Some(a.to_string()),
+        (None, b) => b.map(str::to_string),
+    }
+}
+
+/// The single road from "these mod ids" to "these downloads".
+///
+/// Base game filtering, the api lookup, config pin merging, version selection and failure
+/// collection all happen here and only here. Everything that installs mods goes through this so
+/// a fix in one place is a fix everywhere, which is exactly what wasn't true before.
+///
+/// Hands back what it could resolve plus why the rest didn't make it. Nothing is fatal, one bad
+/// mod never stops the others.
+pub async fn resolve_installs(
+    requests: Vec<InstallRequest>,
+    client: &ApiClient,
+    options: &ResolveOptions,
+) -> Result<(Vec<Install>, Vec<ResolveFailure>), RustiqueError> {
+    // the base game isn't something anybody can download, asking the api for it just 404s
+    let requests: Vec<InstallRequest> = requests
+        .into_iter()
+        .filter(|request| !is_base_game_dep(&request.mod_id))
+        .collect();
+
+    if requests.is_empty() {
+        return Ok((Vec::new(), Vec::new()));
+    }
+
+    let pkgs = if options.apply_config_pins {
+        with_config(|c| c.pkg.clone()).await
+    } else {
+        Vec::new()
+    };
+
+    let mod_ids: Vec<ModID> = requests.iter().map(|r| r.mod_id.clone()).collect();
+    let api_results: HashMap<ModID, Mod> = client.fetch_mods_parallel(mod_ids).await?;
+
+    let mut installs: Vec<Install> = Vec::with_capacity(requests.len());
+    let mut failures: Vec<ResolveFailure> = Vec::new();
+
+    for request in requests {
+        let Some(api_mod) = api_results.get(&request.mod_id) else {
+            failures.push(ResolveFailure::NotFound(request.mod_id));
+            continue;
+        };
+
+        let config_pin = pkgs.iter()
+            .find(|p| p.mod_id.eq_ignore_ascii_case(&request.mod_id))
+            .and_then(|p| p.pinned_version.clone());
+
+        let wanted = merge_condition(request.version_req.as_deref(), config_pin.as_deref());
+
+        let resolved = match resolve_dep_version(api_mod, &request.mod_id, wanted, &options.pinned_game_version, options.allow_unstable) {
+            Ok(pv) => Some(pv),
+            Err(e) => {
+                // the exact build they named may simply be gone, so try what they'll settle for
+                let second_chance = request.fallback_req.as_deref().and_then(|fallback| {
+                    let merged = merge_condition(Some(fallback), config_pin.as_deref());
+                    resolve_dep_version(api_mod, &request.mod_id, merged, &options.pinned_game_version, options.allow_unstable).ok()
+                });
+
+                if second_chance.is_none() {
+                    failures.push(ResolveFailure::NoMatchingVersion(request.mod_id.clone(), e.to_string()));
+                }
+
+                second_chance
+            }
+        };
+
+        let Some((version, download_url, _, _)) = resolved else {
+            continue;
+        };
+
+        installs.push(Install {
+            mod_id: request.mod_id.to_lowercase(),
+            mod_name: api_mod.mod_json.name.clone().unwrap_or_default(),
+            version_to_install: version,
+            download_url,
+            current_file_path: None,
+        });
+    }
+
+    Ok((installs, failures))
+}
+
+/// Resolves one mod against a single set of conditions. Pulled out so the fallback paths can
+/// run the exact same resolution with a different condition.
 fn resolve_dep_version(
     api_mod: &Mod,
     mod_id: &str,
@@ -140,6 +304,9 @@ pub async fn resolve_dependencies(
     let mut graph: DependencyGraph = HashMap::new();
     let mut queue: VecDeque<Install> = VecDeque::new();
     let mut all_installed: Vec<Installed> = Vec::new();
+    // deps we couldn't get hold of, reported together at the end rather than one notice at a
+    // time. A dependency going missing shouldn't stop everything else from installing
+    let mut unresolved_deps: Vec<String> = Vec::new();
 
     // seed the queue with what was actually asked for BEFORE seeding the installed mods.
     // These download no matter what, even if they are already installed, otherwise update
@@ -211,11 +378,7 @@ pub async fn resolve_dependencies(
                         Ok(mod_info) => {
                             let deps: HashMap<_, _> = mod_info.dependencies
                                 .into_iter()
-                                .filter(|(dep_id, _)| {
-                                    !dep_id.lower_eq("game")
-                                        && !dep_id.lower_eq("creative")
-                                        && !dep_id.lower_eq("survival")
-                                })
+                                .filter(|(dep_id, _)| !is_base_game_dep(dep_id))
                                 .collect();
                             if deps.is_empty() { None } else { Some((installed_mod.mod_id.clone(), deps)) }
                         }
@@ -242,7 +405,9 @@ pub async fn resolve_dependencies(
                     continue;
                 }
 
-                new_deps.entry(dep_id).or_default().push(Requester {
+                // key on lowercase, the graph does. Two mods spelling the same dep differently
+                // would otherwise land in separate buckets and their requirements never compared
+                new_deps.entry(dep_id.to_lowercase()).or_default().push(Requester {
                     mod_id: requester_id.clone(),
                     required_version,
                 });
@@ -262,7 +427,15 @@ pub async fn resolve_dependencies(
                 continue;
             }
 
-            if let Some(api_mod) = api_results.get(dep_id.as_str()) {
+            // the api gave us nothing for this id. It's usually a mod that got renamed, pulled,
+            // or made private, and it dropped out here without a word before
+            let Some(api_mod) = api_results.get(dep_id.as_str()) else {
+                let asked_by = requesters.iter().map(|r| r.mod_id.as_str()).collect::<Vec<_>>().join(", ");
+                unresolved_deps.push(format!("{dep_id}\nNot found on the mod site. Needed by: {asked_by}"));
+                continue;
+            };
+
+            {
                 let mod_name = api_mod.mod_json.name.clone().unwrap_or_default();
                 // println!("Mod name {mod_name}");
                 // the url alias IS the mod ID in MOST cases. Need a check for validity
@@ -272,7 +445,7 @@ pub async fn resolve_dependencies(
                     &api_mod.mod_json.mod_id.clone().to_string()
                 };
 
-                let pkg = match pkgs.iter().find(|p| p.mod_id.eq(mod_id)) {
+                let pkg = match pkgs.iter().find(|p| p.mod_id.eq_ignore_ascii_case(mod_id)) {
                     Some(p) => p.clone(),
                     _ => {Package::default()}
                 };
@@ -380,6 +553,10 @@ pub async fn resolve_dependencies(
                 });
             }
         }
+    }
+
+    if !unresolved_deps.is_empty() {
+        display_incompatible_mods_constraint(unresolved_deps, "Dependencies that could not be installed".into());
     }
 
     Ok((graph, all_installed))

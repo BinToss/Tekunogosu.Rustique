@@ -3,21 +3,20 @@ use crate::api::api_structs::{ModApi, ModInfo};
 use crate::config::config_manager::Config;
 use crate::config::config_manager::{get_config, with_config};
 use crate::consts::{FILE_GAME_VERSION_SYNC, FILE_MODINFO_JSON, FILE_RUSTIQUE_SYNC};
-use crate::information_utils::{CellData, display_table, notice};
+use crate::information_utils::{CellData, display_table};
 use crate::install_manager::{Install, Installed};
 use crate::rustique_errors::RustiqueError;
 use crate::traits::ref_ext::{PathRef, StrRef};
 use crate::version_management::parse_version;
 use async_zip::tokio::read::fs::ZipFileReader;
 use chrono::{DateTime, Duration, NaiveDateTime, Utc};
-use comfy_table::{Color, Attribute};
+use comfy_table::Color;
 use comfy_table::presets::UTF8_HORIZONTAL_ONLY;
 use dirs::home_dir;
 use futures::{StreamExt, stream};
 use owo_colors::OwoColorize;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::process::exit;
 use semver::VersionReq;
 use serde_json::to_string_pretty;
 use tokio::fs::File;
@@ -25,7 +24,6 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{debug, error, info, warn};
 use crate::symlink_manager::SymlinkManager;
 use crate::sync_structs::{GameVersionSync, ModSyncInfo};
-use crate::traits::string_ext::StrLowerExt;
 
 pub fn get_current_time() -> String {
     let datetime: DateTime<Utc> = Utc::now();
@@ -49,10 +47,8 @@ pub fn get_expanded_path(dir: impl PathRef) -> PathBuf {
     let dir = dir.as_ref();
     if dir.starts_with("~/") {
         if let Some(home) = home_dir() {
-            let d = match dir.strip_prefix("~") {
-                Ok(d) => d,
-                Err(e) => panic!("{}", e),
-            };
+            // can't actually fail, we only got here because it starts with ~/
+            let d = dir.strip_prefix("~").unwrap_or(dir);
             return PathBuf::new().join(home).join(d);
         }
     }
@@ -260,6 +256,14 @@ pub fn sanitize_string(string: &str) -> String {
 }
 
 // Helper function to get just installed dependencies by passing empty vec and hashmap to the parts that filter out dependencies
+/// game, creative and survival are the base game itself, not mods anyone can download.
+/// Every dependency walk has to skip them or we end up asking the api for mods that don't exist.
+pub fn is_base_game_dep(dep_id: &str) -> bool {
+    dep_id.eq_ignore_ascii_case("game")
+        || dep_id.eq_ignore_ascii_case("creative")
+        || dep_id.eq_ignore_ascii_case("survival")
+}
+
 pub fn gather_dependencies(installed_mods: &HashMap<ModFileName, ModInfo>) -> Vec<Install> {
     gather_missing_dependencies(installed_mods, &[], &BTreeMap::new())
 }
@@ -296,9 +300,7 @@ pub fn gather_missing_dependencies<V: AsRef<[ModID]>>(
                 .dependencies
                 .iter()
                 .filter_map(|(mod_id, version)| {
-                    if !mod_id.lower_eq("game")
-                        && !mod_id.lower_eq("survival")
-                        && !mod_id.lower_eq("creative")
+                    if !is_base_game_dep(mod_id)
                         && !present.contains(&mod_id.to_lowercase())
                     {
                         Some(Install {
@@ -384,30 +386,31 @@ pub async fn write_json_file(
     Ok(())
 }
 
-pub async fn sorted_game_versions() -> Vec<String> {
+pub async fn sorted_game_versions() -> Result<Vec<String>, RustiqueError> {
     let version_file_path = Config::get_path().join(FILE_GAME_VERSION_SYNC);
 
-    let mut versions = if version_file_path.exists() {
-        match parse_json_file::<GameVersionSync>(&version_file_path).await {
-            Ok(file_data) => file_data.game_versions,
-            Err(e) => {
-                eprintln!("Error: {e}");
-                exit(1)
-            }
-        }
-    } else {
-        eprintln!("Unable to get latest game version by default, run Rustique sync and try again");
-        exit(1)
-    };
+    if !version_file_path.exists() {
+        return Err(RustiqueError::SimpleError(
+            "No game version data yet. Run [rustique sync] to fetch it, then try this again.".into()
+        ));
+    }
 
+    let mut versions = parse_json_file::<GameVersionSync>(&version_file_path).await?.game_versions;
+
+    // one version string the api hands back that we can't parse shouldn't take the command
+    // down with it, sort those to the bottom and carry on
     versions.sort_by(|v1, v2| {
-        let v1_p = lenient_semver::parse(v1).unwrap();
-        let v2_p = lenient_semver::parse(v2).unwrap();
-        v1_p.cmp(&v2_p)
+        match (lenient_semver::parse(v1), lenient_semver::parse(v2)) {
+            (Ok(a), Ok(b)) => a.cmp(&b),
+            (Ok(_), Err(_)) => std::cmp::Ordering::Greater,
+            (Err(_), Ok(_)) => std::cmp::Ordering::Less,
+            (Err(_), Err(_)) => std::cmp::Ordering::Equal,
+        }
     });
 
     versions.reverse();
-    versions
+
+    Ok(versions)
 }
 
 /// Returns mod_id as lowercase
@@ -521,23 +524,23 @@ pub fn split_modid_version(mod_id_str: impl StrRef) -> (ModID, Option<ModVersion
         let version = pin_version(version);
 
         let p_ver = match VersionReq::parse(&version) {
-            Ok(v) => v,
+            Ok(v) => v.to_string(),
             Err(_) => {
-                notice(
-                format!(
+                // one bad version string shouldn't kill the whole command. This gets called over
+                // sync file keys too, so hand it back as typed and let whoever resolves it fail
+                // for that one mod with a message naming it
+                warn!(
                     "{} - failed to parse {}, invalid semver version. See https://semver.org for valid semver standards",
                     mod_id_str.as_ref(), version
-                ),
-                Some(Color::Red),
-                vec![Attribute::Bold],
-            );
-                exit(1)
+                );
+
+                version.clone()
             }
         };
 
         // lowercase here same as the no-version branch below does. Everything downstream keys
         // off lowercase ids, and authors put uppercase in their modinfo.json all the time
-        return (modid.to_lowercase(), Some(p_ver.to_string()));
+        return (modid.to_lowercase(), Some(p_ver));
     }
 
     (mod_id_str.as_ref().to_string().to_lowercase(), None)

@@ -6,7 +6,6 @@ use tokio::fs::ReadDir;
 use tracing::{info, warn};
 use rustique_core::aliases::{ModFileName, ModID, ModVersion};
 use rustique_core::api::api_structs::ModInfo;
-use rustique_core::traits::string_ext::StrLowerExt;
 use crate::commands::arg_structs::delete_args::DeleteArgAllVals;
 use crate::commands::sync::get_sync_data;
 use rustique_core::config::config_manager::with_config;
@@ -15,7 +14,7 @@ use rustique_core::information_utils::{display_table, notice, CellData};
 use rustique_core::symlink_manager::SymlinkManager;
 use rustique_core::rustique_errors::RustiqueError;
 use rustique_core::traits::ref_ext::PathRef;
-use rustique_core::utils::{delete_file, extract_all_mods_metadata, split_modid_version};
+use rustique_core::utils::{delete_file, extract_all_mods_metadata, is_base_game_dep, split_modid_version};
 use rustique_core::version_management::compare_versions;
 
 pub async fn delete_all(mod_dir: impl PathRef, delete_type: &DeleteArgAllVals) -> Result<(), RustiqueError> {
@@ -87,7 +86,7 @@ pub async fn iterate_and_move_zip(curr_items: &mut ReadDir, target_dir: impl Pat
 fn dep_ids(modinfo: &ModInfo) -> impl Iterator<Item = ModID> + '_ {
     modinfo.dependencies
         .keys()
-        .filter(|dep_id| !dep_id.lower_eq("game") && !dep_id.lower_eq("creative") && !dep_id.lower_eq("survival"))
+        .filter(|dep_id| !is_base_game_dep(dep_id))
         .map(|dep_id| dep_id.to_lowercase())
 }
 

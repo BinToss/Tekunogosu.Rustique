@@ -106,7 +106,7 @@ async fn set(args: &CommonArgs) {
         if VersionReq::parse(&version).is_err() {
             notice(
                 "The version string you tried to pin is invalid. \
-                 Valid operators are: <, <=, >, >=, =. \
+                 Valid operators are: <, <=, >, >=, =, ~ \
                  Wildcards (*) are supported as the trailing section (e.g., '0.1.*'), \
                  but they cannot be used if the version includes pre-release identifiers (e.g., '-rc', '-pre', '-alpha').",
                 Some(Color::Yellow),
@@ -119,7 +119,8 @@ async fn set(args: &CommonArgs) {
             pkg.pinned_version = Some(version.clone());
         } else {
             config.pkg.push(Package {
-                mod_id: with_mod.clone(),
+                // store it lowercased, everything downstream keys off lowercase ids
+                mod_id: with_mod.to_lowercase(),
                 pinned_version: Some(version.clone()),
             });
         }
@@ -262,12 +263,12 @@ async fn del(args: &DelArgs) {
 
     if args.pinned_mod.is_some() {
         let Some(mod_id) = &args.pinned_mod else {
-                warn!("You must provide a Mod ID before anything can be removed. Run [./Rustique config list] to show all valid options");
+                warn!("You must provide a Mod ID before anything can be removed. Run [./rustique config list] to show all valid options");
                 exit(1);
             };
 
         if !config.pkg.is_empty() {
-            config.pkg.retain(|p| p.mod_id != *mod_id);
+            config.pkg.retain(|p| !p.mod_id.eq_ignore_ascii_case(mod_id));
             save = true;
             display_vec.push(command_output("Removed pinned version from: ", mod_id));
         }
