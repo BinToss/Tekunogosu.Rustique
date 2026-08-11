@@ -1,5 +1,5 @@
 use crate::commands::arg_structs::config_args::{DelArgs, CommonArgs, ConfigCommand, ConfigSubCommand};
-use rustique_core::utils::{exact_pin, get_expanded_path};
+use rustique_core::utils::{get_expanded_path, pin_version};
 use std::path::PathBuf;
 use std::process::exit;
 use comfy_table::{Attribute, CellAlignment, Color, ContentArrangement, Row, Table};
@@ -68,11 +68,16 @@ async fn set(args: &CommonArgs) {
     }
 
     if let Some(version) = &args.pin_game_version {
-        if VersionReq::parse(version).is_err() {
+
+        // 1.21 on its own parses as ^1.21 and would take 1.22, which isn't a pin. Same treatment
+        // the mod pins get: full major.minor.patch means that exact build, shorter keeps the patch open
+        let version = pin_version(version);
+
+        if VersionReq::parse(&version).is_err() {
             notice(
                 "The version string you tried to pin is invalid. \
                  Valid operators are: <, <=, >, >=, =. \
-                 Wildcards (*) are supported for major, minor, or patch sections (e.g., '1.22.*'), \
+                 Wildcards (*) are supported as the trailing section (e.g., '1.22.*'), \
                  but they cannot be used if the version includes pre-release identifiers (e.g., '-rc', '-pre', '-alpha').",
                 Some(Color::Yellow),
                 vec![Attribute::Bold]
@@ -81,9 +86,9 @@ async fn set(args: &CommonArgs) {
             return
         }
 
-        config.pinned_game_version.clone_from(version);
+        config.pinned_game_version.clone_from(&version);
         save = true;
-        display_vec.push(command_output("config.pinned_game_version", version));
+        display_vec.push(command_output("config.pinned_game_version", &version));
     }
 
     if let Some(allow_unstable ) = &args.allow_unstable {
@@ -96,7 +101,7 @@ async fn set(args: &CommonArgs) {
 
         // a bare 2.1.3 parses as ^2.1.3 which would still take 2.1.4 and 2.2.0. Pinning should
         // mean that exact version, same as install modid@version does
-        let version = exact_pin(version);
+        let version = pin_version(version);
 
         if VersionReq::parse(&version).is_err() {
             notice(

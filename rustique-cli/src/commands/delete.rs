@@ -5,6 +5,8 @@ use comfy_table::presets::UTF8_BORDERS_ONLY;
 use tokio::fs::ReadDir;
 use tracing::{info, warn};
 use rustique_core::aliases::{ModFileName, ModID, ModVersion};
+use rustique_core::api::api_structs::ModInfo;
+use rustique_core::traits::string_ext::StrLowerExt;
 use crate::commands::arg_structs::delete_args::DeleteArgAllVals;
 use crate::commands::sync::get_sync_data;
 use rustique_core::config::config_manager::with_config;
@@ -81,7 +83,87 @@ pub async fn iterate_and_move_zip(curr_items: &mut ReadDir, target_dir: impl Pat
     Ok(())
 }
 
-pub async fn delete_cmd(mod_dir: impl PathRef, mod_ids: Vec<ModID>, is_backup: bool) -> Result<(), RustiqueError> {
+/// The dependency ids a mod declares, lowercased, minus the base game pseudo deps
+fn dep_ids(modinfo: &ModInfo) -> impl Iterator<Item = ModID> + '_ {
+    modinfo.dependencies
+        .keys()
+        .filter(|dep_id| !dep_id.lower_eq("game") && !dep_id.lower_eq("creative") && !dep_id.lower_eq("survival"))
+        .map(|dep_id| dep_id.to_lowercase())
+}
+
+/// Removes dependencies the deleted mods brought along, as long as nothing still installed asks
+/// for them. Loops until it stops finding any, so a chain of A needs B needs C clears in one go.
+///
+/// Anything it deletes gets pushed onto processed_mods so the sync file pruning picks it up too.
+/// Symlinks never reach here, all_metadata is already gathered without them. A modpack carries
+/// its own copies of what it needs, so nothing in the mods dir is holding it up.
+async fn remove_orphaned_deps(
+    mod_dir: &Path,
+    all_metadata: &HashMap<ModFileName, ModInfo>,
+    processed_mods: &mut Vec<(ModID, ModVersion, ModFileName)>,
+) -> Vec<String> {
+    let mut removed: Vec<String> = Vec::new();
+    let mut failed: HashSet<ModFileName> = HashSet::new();
+
+    // only things the mods we deleted were actually asking for are eligible to go
+    let mut candidates: HashSet<ModID> = processed_mods
+        .iter()
+        .filter_map(|(_, _, filename)| all_metadata.get(filename))
+        .flat_map(dep_ids)
+        .collect();
+
+    loop {
+        let deleted_files: HashSet<&ModFileName> = processed_mods.iter().map(|(_, _, f)| f).collect();
+
+        // anything a mod that's staying still depends on is off limits
+        let still_needed: HashSet<ModID> = all_metadata
+            .iter()
+            .filter(|(filename, _)| !deleted_files.contains(filename))
+            .flat_map(|(_, modinfo)| modinfo.dependencies.keys())
+            .map(|dep_id| dep_id.to_lowercase())
+            .collect();
+
+        let orphans: Vec<(ModFileName, ModInfo)> = all_metadata
+            .iter()
+            .filter(|(filename, modinfo)| {
+                let mod_id = modinfo.mod_id.to_lowercase();
+
+                !deleted_files.contains(filename)
+                    && !failed.contains(*filename)
+                    && candidates.contains(&mod_id)
+                    && !still_needed.contains(&mod_id)
+            })
+            .map(|(filename, modinfo)| (filename.clone(), modinfo.clone()))
+            .collect();
+
+        if orphans.is_empty() {
+            break;
+        }
+
+        for (filename, modinfo) in orphans {
+            let mod_id = modinfo.mod_id.to_lowercase();
+            let version = modinfo.version.clone().unwrap_or("0.0.0".into());
+
+            match delete_file(mod_dir.join(&filename)).await {
+                Ok(()) => {
+                    removed.push(format!("{mod_id}@{version}"));
+                    // whatever this one pulled in might have just been orphaned as well
+                    candidates.extend(dep_ids(&modinfo));
+                    processed_mods.push((mod_id, version, filename));
+                }
+                Err(e) => {
+                    warn!("Failed to delete dependency {}: {}", filename, e);
+                    // remember it or the next pass finds it again and we never finish
+                    failed.insert(filename);
+                }
+            }
+        }
+    }
+
+    removed
+}
+
+pub async fn delete_cmd(mod_dir: impl PathRef, mod_ids: Vec<ModID>, is_backup: bool, with_deps: bool) -> Result<(), RustiqueError> {
     
     // get_sync_data takes its own read guard further down, don't still be holding one
     let backup_mods_dir = with_config(|c| c.backup_mods_dir.clone()).await;
@@ -133,6 +215,21 @@ pub async fn delete_cmd(mod_dir: impl PathRef, mod_ids: Vec<ModID>, is_backup: b
         }
     }
     
+    // opt in only. Rustique can't tell a library mod from a content mod, and plenty of content
+    // mods are depended on by others, so sweeping deps out by default would take them with it.
+    // Backups aren't loaded by the game so dependencies between them mean nothing
+    if with_deps && !is_backup && !processed_mods.is_empty() {
+        let orphaned = remove_orphaned_deps(mod_dir, &all_metadata, &mut processed_mods).await;
+
+        if !orphaned.is_empty() {
+            notice(
+                format!("Also removed dependencies nothing else needed: [{}]", orphaned.join("], [")),
+                Some(Color::Yellow),
+                vec![Attribute::Bold],
+            );
+        }
+    }
+
     if !processed_mods.is_empty() {
         // get sync data and remove all the processed_mods from it. (this saves having to sync again)
         let mut sync_data = get_sync_data(&mod_dir, true).await?;

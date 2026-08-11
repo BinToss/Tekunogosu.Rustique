@@ -15,7 +15,7 @@ use comfy_table::presets::UTF8_HORIZONTAL_ONLY;
 use dirs::home_dir;
 use futures::{StreamExt, stream};
 use owo_colors::OwoColorize;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::exit;
 use semver::VersionReq;
@@ -271,21 +271,25 @@ pub fn gather_missing_dependencies<V: AsRef<[ModID]>>(
 ) -> Vec<Install> {
     // if there are reports of slowness is this section .values().par_bridge()...flat_map_iter() could be used to speed it up
     // this is prob not an issue even with a lot of mods as the data is all in memory at this point
-    let id_vec: Vec<ModID> = sync_data
+    //
+    // everything gets lowercased on the way in. Sync keys already are, but dependency ids and the
+    // ids in modinfo.json are whatever the author felt like typing, so comparing raw misses matches
+    let mut present: HashSet<ModID> = sync_data
         .keys()
-        .map(|m| {
-            let p = split_modid_version(m).0; // split the version from the mod_id
-            p.clone()
-        })
+        .map(|m| split_modid_version(m).0) // split the version from the mod_id
         .collect();
 
-    let mods_requested = mods_requested.as_ref();
+    // the sync file is a cache and it lags behind reality, most obviously right after a modpack
+    // is enabled and its symlinks turn up. What's actually in the folder is the real answer
+    present.extend(installed_mods.values().map(|mod_info| mod_info.mod_id.to_lowercase()));
+
+    let mods_requested: Vec<ModID> = mods_requested.as_ref().iter().map(|m| m.to_lowercase()).collect();
 
     installed_mods
         // .values()
         .iter()
         .filter(|(_, mod_info)| {
-            mods_requested.is_empty() || mods_requested.contains(&mod_info.mod_id)
+            mods_requested.is_empty() || mods_requested.contains(&mod_info.mod_id.to_lowercase())
         })
         .flat_map(|(mod_filename, mod_info)| {
             mod_info
@@ -295,7 +299,7 @@ pub fn gather_missing_dependencies<V: AsRef<[ModID]>>(
                     if !mod_id.lower_eq("game")
                         && !mod_id.lower_eq("survival")
                         && !mod_id.lower_eq("creative")
-                        && !id_vec.contains(mod_id)
+                        && !present.contains(&mod_id.to_lowercase())
                     {
                         Some(Install {
                             mod_id: mod_id.clone(),
@@ -514,7 +518,7 @@ pub fn split_modid_version(mod_id_str: impl StrRef) -> (ModID, Option<ModVersion
         .unwrap_or(mod_id_str.as_ref())
         .split_once('@')
     {
-        let version = exact_pin(version);
+        let version = pin_version(version);
 
         let p_ver = match VersionReq::parse(&version) {
             Ok(v) => v,
@@ -551,14 +555,33 @@ pub fn is_semver_range(s: &str) -> bool {
     has_semver_operator(s) || s.contains('*')
 }
 
-/// Turns a bare 2.1.3 into =2.1.3 so a pin means that exact version. Left alone it parses as
-/// ^2.1.3 and happily takes 2.1.4 or 2.2.0, which isn't what pinning means to anyone.
-/// Anything the user already wrote as a range is passed straight through.
-pub fn exact_pin(version: &str) -> String {
+/// ANDs two version conditions together so both have to hold. semver won't allow a bare * to sit
+/// next to another comparator, and * means "any version" anyway, so it just drops out.
+pub fn combine_version_reqs(a: &str, b: &str) -> String {
+    match (a.trim(), b.trim()) {
+        ("*", other) | (other, "*") => other.to_string(),
+        (a, b) => format!("{a}, {b}"),
+    }
+}
+
+/// Pins a version the way someone typing it actually means it.
+///
+/// A full major.minor.patch pins to exactly that build, anything shorter pins to the newest patch
+/// of that major.minor. Left alone semver reads a bare 1.21 as ^1.21 and a bare 1.21.0 as ^1.21.0,
+/// both of which happily take 1.22 and aren't pins at all.
+/// Anything already written as a range or a wildcard is passed straight through.
+pub fn pin_version(version: &str) -> String {
+    let version = version.trim();
+
     if is_semver_range(version) {
-        version.to_string()
-    } else {
+        return version.to_string();
+    }
+
+    // three parts means they named an exact build, fewer and the patch is still open
+    if version.split('.').count() >= 3 {
         format!("={version}")
+    } else {
+        format!("~{version}")
     }
 }
 

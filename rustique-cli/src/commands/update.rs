@@ -95,7 +95,7 @@ pub async fn update_mods<V: AsRef<[ModID]>>(mod_dir: impl PathRef, update_mod_id
     debug!("final_mod_update_list: {:#?}", final_mod_update_list);
 
 
-    let mods_processed: Vec<Installed> = install_manager(mod_dir, final_mod_update_list, installed_mods).await?;
+    let mods_processed: Vec<Installed> = install_manager(mod_dir, final_mod_update_list, installed_mods, false).await?;
     
     if backup_mods {
         backup_older_files(&mods_processed).await?;

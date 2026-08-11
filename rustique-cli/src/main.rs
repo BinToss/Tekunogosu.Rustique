@@ -233,7 +233,7 @@ async fn async_main() {
             let show_execution_time = get_config().read().await.show_execution_time;
 
             if !args.mod_ids.is_empty() {
-                match install_cmd(&mod_dir, args.mod_ids.clone(), args.force).await {
+                match install_cmd(&mod_dir, args.mod_ids.clone(), args.force, args.ignore_dependencies).await {
                     Ok(()) => {
                         handle_sync_call(&mod_dir, false).await;
                     }
@@ -317,7 +317,7 @@ async fn async_main() {
         Commands::Delete(args) => {
             if !args.mod_id.is_empty() {
                 handle_err_result(
-                    delete_cmd(&mod_dir, args.mod_id.clone(), args.mod_backups).await,
+                    delete_cmd(&mod_dir, args.mod_id.clone(), args.mod_backups, args.with_deps).await,
                     "Unable to delete mod(s)",
                     true,
                     ErrorMsgFn::Error,

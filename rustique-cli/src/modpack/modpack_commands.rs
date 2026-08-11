@@ -89,16 +89,24 @@ pub async fn parse_modpack_commands(commands: &ModpackCommands, mod_dir: impl Pa
            
         }
         ModpackSubCommands::Enable(args) => {
-            match mp_enable(args.mpk_id.clone(), mod_dir, args.force).await {
+            match mp_enable(args.mpk_id.clone(), &mod_dir, args.force).await {
                 Ok(enabled_pack) => {
-                    let mut config = get_config().write().await;
-                    config.modpacks.enabled.push(enabled_pack.clone());
-                    config.modpacks.disabled.retain(|e| !e.eq_ignore_ascii_case(&enabled_pack));
-                    match config.save(None) {
+                    // scope the write guard, handle_sync_call takes a read one of its own below
+                    let saved = {
+                        let mut config = get_config().write().await;
+                        config.modpacks.enabled.push(enabled_pack.clone());
+                        config.modpacks.disabled.retain(|e| !e.eq_ignore_ascii_case(&enabled_pack));
+                        config.save(None)
+                    };
+
+                    match saved {
                         Ok(()) => {
                             notice(format!("Modpack: [{enabled_pack}] has been enabled!"), Some(Color::Green), vec![Attribute::Bold]);
+                            // the symlinks only just appeared, the mod dir sync file has no idea
+                            // they exist yet and everything depending on them would read as missing
+                            handle_sync_call(&mod_dir, false).await;
                         }
-                        Err(e) => { 
+                        Err(e) => {
                             // If we fail to save, we should remove the symlinks
                             error!("{}", e.to_string().red().bold());
                         }
@@ -110,17 +118,24 @@ pub async fn parse_modpack_commands(commands: &ModpackCommands, mod_dir: impl Pa
             }
         }
         ModpackSubCommands::Disable(args) => {
-            match mp_disable(args.mpk_id.clone(), mod_dir).await {
+            match mp_disable(args.mpk_id.clone(), &mod_dir).await {
                 Ok(disabled_pack) => {
-                    let mut config = get_config().write().await;
-                    config.modpacks.enabled.retain(|m| !m.eq_ignore_ascii_case(&disabled_pack));
-                    config.modpacks.disabled.push(disabled_pack.clone());
-                    match config.save(None) {
+                    // scope the write guard, handle_sync_call takes a read one of its own below
+                    let saved = {
+                        let mut config = get_config().write().await;
+                        config.modpacks.enabled.retain(|m| !m.eq_ignore_ascii_case(&disabled_pack));
+                        config.modpacks.disabled.push(disabled_pack.clone());
+                        config.save(None)
+                    };
+
+                    match saved {
                         Ok(()) => {
-                           notice(format!("Modpack: [{disabled_pack}] has been disabled!"), Some(Color::Green), vec![Attribute::Bold]); 
-                        } 
+                           notice(format!("Modpack: [{disabled_pack}] has been disabled!"), Some(Color::Green), vec![Attribute::Bold]);
+                           // the symlinks are gone now, get them back out of the sync file
+                           handle_sync_call(&mod_dir, false).await;
+                        }
                         Err(e) => {
-                           error!("{}", e.to_string().red().bold()); 
+                           error!("{}", e.to_string().red().bold());
                         }
                     }
                 }

@@ -401,10 +401,18 @@ pub async fn cmd_list(
         println!("{table}");
         print!("{} {}", "Total Mod Count:".bright_green().bold().on_black(), installed_mods.len().to_string().bright_purple().on_black());
 
+        // only worth a mention when they've actually set one
+        if !config.pinned_game_version.is_empty() {
+            print!(" - {}: {}", "Pinned Game Version".bright_green().bold().on_black(), config.pinned_game_version.bright_purple().on_black());
+        }
+
         if config.show_execution_time {
             let elapsed = format!("{:.2}", start_time.elapsed().as_secs_f64());
-            println!(" - {}: {}{}","List operation took".bright_green().bold().on_black(), elapsed.bright_purple().on_black(), "s".bright_yellow().on_black());
+            print!(" - {}: {}{}","List operation took".bright_green().bold().on_black(), elapsed.bright_purple().on_black(), "s".bright_yellow().on_black());
         }
+
+        // the footer is built up with print!, so it needs closing off here or the line never ends
+        println!();
     }
 
     Ok(())

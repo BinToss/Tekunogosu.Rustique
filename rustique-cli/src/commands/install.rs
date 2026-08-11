@@ -7,27 +7,16 @@ use crate::commands::sync::{get_sync_data};
 use rustique_core::install_manager::{install_manager, Install};
 use rustique_core::rustique_errors::RustiqueError;
 use rustique_core::rustique_errors::RustiqueError::SimpleError;
-use rustique_core::utils::{extract_all_mods_metadata, gather_missing_dependencies, split_modid_version};
+use rustique_core::utils::{combine_version_reqs, extract_all_mods_metadata, gather_missing_dependencies, split_modid_version};
 use rustique_core::version_management::{parse_latest_version, parse_pinned_version};
 use tracing::{debug, info};
 use rustique_core::config::config_manager::{with_config, Package};
 use rustique_core::information_utils::{command_output, display_incompatible_mods_constraint, display_installation_results, display_table, notice};
 use rustique_core::traits::ref_ext::PathRef;
 
-/// ANDs a version typed on the command line together with the mod's config pin so both have to
-/// hold. semver won't let a bare * sit alongside another comparator, and * means "any version"
-/// anyway, so there the pin just stands on its own.
-fn combine_pins(cli_version: &str, config_pin: &str) -> String {
-    if cli_version.trim() == "*" {
-        config_pin.to_string()
-    } else {
-        format!("{cli_version}, {config_pin}")
-    }
-}
-
 // Report if trying install a mod that already exists
 // Use -f to force an installation
-pub async fn install_cmd(mod_dir: impl PathRef, mods_requested: Vec<ModID>, force: bool) -> Result<(), RustiqueError> {
+pub async fn install_cmd(mod_dir: impl PathRef, mods_requested: Vec<ModID>, force: bool, ignore_dependencies: bool) -> Result<(), RustiqueError> {
     let mod_dir = mod_dir.as_ref();
     info!("install_cmd: {mods_requested:?}");
     
@@ -94,7 +83,7 @@ pub async fn install_cmd(mod_dir: impl PathRef, mods_requested: Vec<ModID>, forc
             // we'd put a version on disk that the next sync and update quietly reverts back to the
             // pin anyway. Both conditions have to hold, and -f is the way out
             let pinned_version = match (&cli_version, &config_pin) {
-                (Some(cli), Some(pin)) if !force => Some(combine_pins(cli, pin)),
+                (Some(cli), Some(pin)) if !force => Some(combine_version_reqs(cli, pin)),
                 (Some(cli), _) => Some(cli.clone()),
                 (None, _) => config_pin.clone(),
             };
@@ -155,7 +144,7 @@ pub async fn install_cmd(mod_dir: impl PathRef, mods_requested: Vec<ModID>, forc
 
     info!("Mods requested {:?}", mods_requested);
 
-    let mods_processed = install_manager(mod_dir, mods_requested.clone(), installed_mods).await?;
+    let mods_processed = install_manager(mod_dir, mods_requested.clone(), installed_mods, ignore_dependencies).await?;
 
     display_installation_results(mods_processed);
 
@@ -213,7 +202,7 @@ pub async fn install_missing_deps<V: AsRef<[ModID]>>(mod_dir_for_req: impl PathR
 
     debug!("deps: {:?}", missing_deps);
 
-    let mods_processed = install_manager(dep_install_path, missing_deps, sync_data).await?;
+    let mods_processed = install_manager(dep_install_path, missing_deps, sync_data, false).await?;
 
 
     info!("mods_processed {:#?}", mods_processed);

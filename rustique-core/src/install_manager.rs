@@ -1,16 +1,16 @@
-use crate::aliases::{DownloadURL, ModID, ModName, ModVersion};
+use crate::aliases::{DownloadURL, ModID, ModName, ModVersion, PinnedVersionInfo};
 use crate::api::api_structs::{Mod, ModInfo};
 use crate::api::client::{ApiClient};
 use crate::api::download::download_requested_mods;
 use crate::rustique_errors::RustiqueError;
-use crate::utils::{extract_zip_metadata, split_modid_version};
-use crate::version_management::{parse_pinned_version};
+use crate::utils::{combine_version_reqs, extract_zip_metadata, has_semver_operator, split_modid_version};
+use crate::version_management::{parse_pinned_version, parse_version};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::PathBuf;
 use comfy_table::{Attribute, Color};
 use futures::stream::{self, StreamExt};
 use indicatif::MultiProgress;
-use tracing::{error, info};
+use tracing::{debug, error, info};
 use crate::config::config_manager::{with_config, Package};
 use crate::consts::FILE_MODINFO_JSON;
 use crate::information_utils::notice;
@@ -80,12 +80,56 @@ pub struct ResolvedDep {
 
 pub type DependencyGraph = HashMap<ModID, ResolvedDep>;
 
+/// Turns a dependency's declared version into something we can resolve against.
+///
+/// Authors declare a dep like 2.3.1 meaning "this is what I built against". A different patch of
+/// the same major.minor is compatible, a different minor usually isn't, so we ask for ~2.3.1.
+/// If they already wrote an operator we take them at their word, and anything unparseable or a
+/// wildcard means they never really pinned it so we leave it open.
+fn dependency_requirement(required_version: &str) -> Option<ModVersion> {
+    let required = required_version.trim();
+
+    if required.is_empty() || required == "*" {
+        return None;
+    }
+
+    if has_semver_operator(required) {
+        return Some(required.to_string());
+    }
+
+    match parse_version(required) {
+        Ok(v) => Some(format!("~{}.{}.{}", v.major, v.minor, v.patch)),
+        Err(_) => {
+            debug!("Can't parse dependency version {required}, leaving it unconstrained");
+            None
+        }
+    }
+}
+
+/// Resolves one dependency against a single set of conditions. Pulled out so the conflict
+/// fallback below can run the exact same resolution with a different condition.
+fn resolve_dep_version(
+    api_mod: &Mod,
+    mod_id: &str,
+    pinned_version: Option<ModVersion>,
+    pinned_game_version: &str,
+    allow_unstable: bool,
+) -> Result<PinnedVersionInfo, RustiqueError> {
+    parse_pinned_version(
+        &api_mod.mod_json.releases,
+        &Package { mod_id: mod_id.to_string(), pinned_version },
+        pinned_game_version,
+        allow_unstable,
+    )
+}
+
 pub async fn resolve_dependencies(
     mod_dir: &std::path::Path,
     initial_mods: Vec<Install>,
     installed_mods: &BTreeMap<ModID, ModSyncInfo>,
     client: &ApiClient,
     mp: &MultiProgress,
+    ignore_dependencies: bool,
 ) -> Result<(DependencyGraph, Vec<Installed>), RustiqueError> {
     // grab what we need up front. Holding the guard across every download and api call below
     // would block any writer for the whole run and deadlock us if one ever queues up
@@ -152,9 +196,14 @@ pub async fn resolve_dependencies(
         });
         all_installed.extend(recently_installed.clone());
 
+        // -i means install exactly what was asked for, don't go looking for what it needs
+        if ignore_dependencies {
+            break;
+        }
+
         // read modinfo.json from each downloaded mod to discover dependencies
         #[allow(clippy::redundant_closure)]
-        let dep_maps: Vec<HashMap<String, String>> = stream::iter(recently_installed.iter())
+        let dep_maps: Vec<(ModID, HashMap<String, String>)> = stream::iter(recently_installed.iter())
             .map(|installed_mod| {
                 async move {
                     let path = installed_mod.installed_file_path.clone()?;
@@ -168,7 +217,7 @@ pub async fn resolve_dependencies(
                                         && !dep_id.lower_eq("survival")
                                 })
                                 .collect();
-                            if deps.is_empty() { None } else { Some(deps) }
+                            if deps.is_empty() { None } else { Some((installed_mod.mod_id.clone(), deps)) }
                         }
                         Err(err) => {
                             error!("Failed to extract zip metadata: {:?}", err);
@@ -182,14 +231,23 @@ pub async fn resolve_dependencies(
             .collect()
             .await;
 
-        // flatten all deps from every mod in the batch into a single HashMap
-        // hashmap collects deduplicates by key, so shared deps across mods only appear once
+        // group every requirement under the dep it belongs to. Collecting straight into a map
+        // keyed by dep would drop all but one of them, and which one survived came down to
+        // whichever download happened to finish last
         // filter already-seen mods (those in graph) before collecting
-        let new_deps: HashMap<String, String> = dep_maps
-            .into_iter()
-            .flat_map(|deps| deps.into_iter())
-            .filter(|(dep_id, _)| !graph.contains_key(&dep_id.to_lowercase()))
-            .collect();
+        let mut new_deps: HashMap<ModID, Vec<Requester>> = HashMap::new();
+        for (requester_id, deps) in dep_maps {
+            for (dep_id, required_version) in deps {
+                if graph.contains_key(&dep_id.to_lowercase()) {
+                    continue;
+                }
+
+                new_deps.entry(dep_id).or_default().push(Requester {
+                    mod_id: requester_id.clone(),
+                    required_version,
+                });
+            }
+        }
 
         if new_deps.is_empty() {
             continue;
@@ -198,7 +256,7 @@ pub async fn resolve_dependencies(
         let mod_ids: Vec<ModID> = new_deps.keys().cloned().collect();
         let api_results: HashMap<ModID, Mod> = client.fetch_mods_parallel(mod_ids).await?;
 
-        for (dep_id, required_version) in &new_deps {
+        for (dep_id, requesters) in &new_deps {
             let key = dep_id.to_lowercase();
             if graph.contains_key(&key) {
                 continue;
@@ -219,16 +277,69 @@ pub async fn resolve_dependencies(
                     _ => {Package::default()}
                 };
 
-                let (version, url, _, _) =
-                    match parse_pinned_version(&api_mod.mod_json.releases,
-                                               &pkg.clone(),
-                                               pinned_game_version.as_str(),
-                                               allow_unstable) {
-                        Ok(pv) => pv,
-                        Err(e) => {
-                            notice(format!("Unable to locate compatible versions for {} -- {}", dep_id, e), Some(Color::Red), vec![Attribute::Bold]);
-                            continue;
+                // every mod that asked for this dep gets a say. If one version keeps them all
+                // happy we use that, and the user's config pin has to hold on top of it
+                let combined = requesters.iter()
+                    .filter_map(|r| dependency_requirement(&r.required_version))
+                    .reduce(|acc, req| combine_version_reqs(&acc, &req));
+
+                let wanted = match (&combined, &pkg.pinned_version) {
+                    (Some(dep_req), Some(pin)) => Some(combine_version_reqs(dep_req, pin)),
+                    (Some(dep_req), None) => Some(dep_req.clone()),
+                    (None, pin) => pin.clone(),
+                };
+
+                info!("{dep_id}: {} requester(s), resolving against {wanted:?}", requesters.len());
+
+                let resolved = match resolve_dep_version(api_mod, mod_id, wanted, pinned_game_version.as_str(), allow_unstable) {
+                    Ok(pv) => Some(pv),
+                    // nothing satisfies everyone. The game only ever loads the highest copy of a
+                    // mod it finds, so fall back to that rather than installing one it will ignore
+                    Err(e) => {
+                        let highest = requesters.iter()
+                            .filter_map(|r| parse_version(&r.required_version).ok().map(|v| (v, r)))
+                            .max_by(|(a, _), (b, _)| a.cmp(b))
+                            .map(|(_, r)| r);
+
+                        match highest {
+                            Some(winner) if requesters.len() > 1 => {
+                                let fallback = match (dependency_requirement(&winner.required_version), &pkg.pinned_version) {
+                                    (Some(dep_req), Some(pin)) => Some(combine_version_reqs(&dep_req, pin)),
+                                    (Some(dep_req), None) => Some(dep_req),
+                                    (None, pin) => pin.clone(),
+                                };
+
+                                match resolve_dep_version(api_mod, mod_id, fallback, pinned_game_version.as_str(), allow_unstable) {
+                                    Ok(pv) => {
+                                        let asked = requesters.iter()
+                                            .map(|r| format!("{} wants {}", r.mod_id, r.required_version))
+                                            .collect::<Vec<_>>()
+                                            .join(", ");
+
+                                        notice(
+                                            format!("{dep_id} is requested by multiple mods: ({asked}). Installing highest version needed: {}.", winner.required_version),
+                                            Some(Color::Yellow),
+                                            vec![Attribute::Bold],
+                                        );
+
+                                        Some(pv)
+                                    }
+                                    Err(e) => {
+                                        notice(format!("Unable to locate compatible versions for {dep_id} - {e}"), Some(Color::Red), vec![Attribute::Bold]);
+                                        None
+                                    }
+                                }
+                            }
+                            _ => {
+                                notice(format!("Unable to locate compatible versions for {dep_id} - {e}"), Some(Color::Red), vec![Attribute::Bold]);
+                                None
+                            }
                         }
+                    }
+                };
+
+                let Some((version, url, _, _)) = resolved else {
+                    continue;
                 };
 
                 info!("Resolving deps for {url} {version}");
@@ -257,10 +368,7 @@ pub async fn resolve_dependencies(
                     mod_name: mod_name.clone(),
                     version_to_install: version.clone(),
                     download_url: url.clone(),
-                    requesters: vec![Requester {
-                        mod_id: String::from("dependency"),
-                        required_version: required_version.clone(),
-                    }],
+                    requesters: requesters.clone(),
                 });
 
                 queue.push_back(Install {
@@ -280,7 +388,8 @@ pub async fn resolve_dependencies(
 pub async fn install_manager(
     mod_dir: impl PathRef,
     mods_requested: Vec<Install>,
-    installed_mods: BTreeMap<ModID, ModSyncInfo>) -> Result<Vec<Installed>, RustiqueError> {
+    installed_mods: BTreeMap<ModID, ModSyncInfo>,
+    ignore_dependencies: bool) -> Result<Vec<Installed>, RustiqueError> {
 
     info!("Install manager called");
 
@@ -288,7 +397,7 @@ pub async fn install_manager(
     let client = ApiClient::new();
     let mp = MultiProgress::new();
 
-    let (_, mut mods_processed) = resolve_dependencies(mod_dir, mods_requested, &installed_mods, &client, &mp).await?;
+    let (_, mut mods_processed) = resolve_dependencies(mod_dir, mods_requested, &installed_mods, &client, &mp, ignore_dependencies).await?;
 
     mods_processed.sort_by(|a, b| a.mod_name.to_lowercase().cmp(&b.mod_name.to_lowercase()));
 

@@ -180,7 +180,7 @@ pub async fn mp_install(mp_id: ModID, mp_version: Option<ModVersion>) -> Result<
             }))
             .collect();
 
-        let installed = install_manager(&modpack_mod_path, install_mp_mods, mpk_installed).await?;
+        let installed = install_manager(&modpack_mod_path, install_mp_mods, mpk_installed, false).await?;
        
         // Mod saved successfully, add it to the disabled mods so we know its installed
         
