@@ -213,6 +213,26 @@ pub async fn resolve_installs(
         return Ok((Vec::new(), Vec::new()));
     }
 
+    // several mods can ask for the same dependency at once, and at different versions. Merge
+    // them so every condition has to hold. Left separate they each resolve on their own, both
+    // land in the list, and which one actually gets installed comes down to hashmap ordering
+    let mut merged: HashMap<ModID, InstallRequest> = HashMap::new();
+
+    for request in requests {
+        match merged.entry(request.mod_id.to_lowercase()) {
+            std::collections::hash_map::Entry::Vacant(e) => {
+                e.insert(request);
+            }
+            std::collections::hash_map::Entry::Occupied(mut e) => {
+                let existing = e.get_mut();
+                existing.version_req = merge_condition(existing.version_req.as_deref(), request.version_req.as_deref());
+                existing.fallback_req = existing.fallback_req.take().or(request.fallback_req);
+            }
+        }
+    }
+
+    let requests: Vec<InstallRequest> = merged.into_values().collect();
+
     let pkgs = if options.apply_config_pins {
         with_config(|c| c.pkg.clone()).await
     } else {
@@ -297,8 +317,8 @@ pub async fn resolve_dependencies(
 ) -> Result<(DependencyGraph, Vec<Installed>), RustiqueError> {
     // grab what we need up front. Holding the guard across every download and api call below
     // would block any writer for the whole run and deadlock us if one ever queues up
-    let (pkgs, pinned_game_version, allow_unstable) = with_config(|c| {
-        (c.pkg.clone(), c.pinned_game_version.clone(), c.allow_unstable)
+    let (pkgs, pinned_game_version, allow_unstable, jobs) = with_config(|c| {
+        (c.pkg.clone(), c.pinned_game_version.clone(), c.allow_unstable, c.jobs)
     }).await;
 
     let mut graph: DependencyGraph = HashMap::new();
@@ -355,7 +375,7 @@ pub async fn resolve_dependencies(
     while !queue.is_empty() {
         let mut batch: Vec<Install> = queue.drain(..).collect();
 
-        let recently_installed = download_requested_mods(mod_dir, &mut batch, client, Some(mp))
+        let recently_installed = download_requested_mods(mod_dir, &mut batch, client, Some(mp), jobs)
             .await
             .unwrap_or_else(|err| {
             error!("Failed to install batch: {:?}", err);

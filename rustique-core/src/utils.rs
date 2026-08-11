@@ -91,9 +91,10 @@ where
         .entries()
         .iter()
         .position(|e| {
+            // a zip entry whose name isn't valid utf8 just isn't the file we're after
             e.filename()
                 .as_str()
-                .unwrap()
+                .unwrap_or_default()
                 .eq_ignore_ascii_case(inner_file)
         })
         .ok_or_else(|| RustiqueError::ZipError {

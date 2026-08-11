@@ -58,6 +58,10 @@ pub struct Config {
     
     pub pkg: Vec<Package>,
    
+    // How many mods to download at once. 0 lets them all go, which is fine on a fat pipe and
+    // rough on a thin one, every download still gets its own 20s timeout and 3 retries
+    pub jobs: usize,
+
     #[serde(default = "default_sync_time")]
     pub sync_latest_game_version_file_every: i64,
     
@@ -95,6 +99,10 @@ pub struct Package {
     #[serde(default)]
     pub pinned_version: Option<ModVersion>,
 }
+
+/// Bandwidth and the mod site's patience are the limits here, not cpu count, so this is a
+/// flat number rather than something derived from the machine.
+pub const DEFAULT_JOBS: usize = 15;
 
 fn default_sync_time() -> i64 {
     24
@@ -145,6 +153,7 @@ impl Default for Config {
             show_execution_time: true,
             notify_of_unzipped_mods: false,
             game_download_dir: dirs::download_dir().unwrap_or_default().to_string_lossy().to_string(),
+            jobs: DEFAULT_JOBS,
             sync_latest_game_version_file_every: 24,
             sync_mod_search_file_every: 24,
             pkg: Vec::default(),
@@ -282,7 +291,7 @@ impl Config {
         rustique_message(RustiqueMessage {
             header: Some(CellData::new("Your config has new options available".to_string(), Some(Color::Green), vec![Attribute::Bold], Some(CellAlignment::Center))),
             message: vec![
-                CellData::new("The following were added with their default values:".to_string(), Some(Color::Yellow), vec![], None),
+                CellData::new("The following config option(s) were added with their default values:".to_string(), Some(Color::Yellow), vec![], None),
                 CellData::new(format!("[{}]", added.join("], [")), Some(Color::Magenta), vec![Attribute::Bold], None),
                 CellData::new("Your existing settings were left alone. Previous config backed up to:".to_string(), Some(Color::Yellow), vec![], None),
                 CellData::new(backup_path.display().to_string(), Some(Color::Green), vec![], None),

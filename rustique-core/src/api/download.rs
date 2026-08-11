@@ -3,6 +3,8 @@ use crate::install_manager::{Install, Installed};
 use crate::rustique_errors::RustiqueError;
 use owo_colors::OwoColorize;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use tokio::sync::Semaphore;
 use futures::StreamExt;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use tokio::io::AsyncWriteExt;
@@ -12,11 +14,28 @@ use crate::rustique_errors::RustiqueError::UrlParseError;
 use crate::traits::ref_ext::PathRef;
 
 
-pub async fn download_requested_mods(mod_dir: &Path, mods_requested: &mut Vec<Install>, api_client: &ApiClient, mp: Option<&MultiProgress>) -> Result<Vec<Installed>, RustiqueError> {
+/// `jobs` caps how many downloads are in flight at once. 0 lets them all go.
+///
+/// The limit is bandwidth and the mod site's patience, not cpu. Left unbounded a big modpack
+/// opens a few hundred connections that all share one pipe, and on a slow line the tail of them
+/// cross the 20s timeout, retry from zero, and add yet more load to the thing that starved them.
+/// Taking the permit before spawning also means we only draw as many progress bars as we're
+/// actually running.
+pub async fn download_requested_mods(mod_dir: &Path, mods_requested: &mut Vec<Install>, api_client: &ApiClient, mp: Option<&MultiProgress>, jobs: usize) -> Result<Vec<Installed>, RustiqueError> {
 
     let mut tasks = Vec::with_capacity(mods_requested.len());
+    let permits = (jobs > 0).then(|| Arc::new(Semaphore::new(jobs)));
 
     while let Some(mod_request) = mods_requested.pop() {
+        // held for the life of the download and released when the task ends
+        let permit = match &permits {
+            Some(semaphore) => Some(
+                Arc::clone(semaphore).acquire_owned().await
+                    .map_err(|e| RustiqueError::SimpleError(format!("Download limiter closed unexpectedly: {e}")))?
+            ),
+            None => None,
+        };
+
         info!("{} {}", "Attempting to download mod".bright_green(), mod_request.mod_id.to_string().bright_yellow());
 
         let client = api_client.clone();
@@ -36,6 +55,8 @@ pub async fn download_requested_mods(mod_dir: &Path, mods_requested: &mut Vec<In
         });
 
         let task = tokio::spawn(async move {
+            // moved in so the slot stays taken until this download is done with it
+            let _permit = permit;
 
             let mut installed = Installed {
                 mod_id: mod_request.mod_id.clone(),

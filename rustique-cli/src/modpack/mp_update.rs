@@ -68,7 +68,7 @@ pub async fn mp_update(args: MPUpdateArgs) -> Result<(), RustiqueError> {
     
     debug!("{} {:#?}","m_install".green(), m_install.blue());
 
-    let installed = match download_requested_mods(&pack_dir, &mut vec![m_install], &client, None).await {
+    let installed = match download_requested_mods(&pack_dir, &mut vec![m_install], &client, None, 1).await {
         Ok(i) => {
             // there is only 1 file as we only process 1 modpack at a time, but a join error
             // upstream can still hand back nothing and unwrapping that panics

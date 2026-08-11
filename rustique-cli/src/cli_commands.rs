@@ -37,6 +37,10 @@ pub struct Cli {
     #[arg(short, long)]
     pub with_mpk: Option<String>,
 
+    /// How many mods to download at once. 0 means no limit. Overrides the jobs value in your config
+    #[arg(short = 'j', long)]
+    pub jobs: Option<usize>,
+
     #[command(subcommand)]
     pub command: Commands,
 }

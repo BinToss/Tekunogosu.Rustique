@@ -102,7 +102,7 @@ pub async fn mp_install(mp_id: ModID, mp_version: Option<ModVersion>) -> Result<
         };
 
         notice(format!("Downloading Modpack {mp_id}..."), Some(Color::Green), vec![]);
-        let Some(modpack) = download_requested_mods(&packs_dir, &mut vec![install_modpack], &client, None).await?.into_iter().next() else {
+        let Some(modpack) = download_requested_mods(&packs_dir, &mut vec![install_modpack], &client, None, 1).await?.into_iter().next() else {
             return Err(RustiqueError::SimpleError("Modpack download failure..".into()));
         };
         modpack

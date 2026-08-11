@@ -6,7 +6,7 @@ use comfy_table::{Attribute, CellAlignment, Color, ContentArrangement, Row, Tabl
 use comfy_table::modifiers::UTF8_ROUND_CORNERS;
 use comfy_table::presets::{UTF8_FULL_CONDENSED};
 use semver::VersionReq;
-use tracing::{warn};
+use tracing::{error, warn};
 use crate::commands::config_table::config_table;
 use rustique_core::config::config_manager::{get_config, Config, Package};
 use rustique_core::config::config_structs::{CellAttr, CellColor};
@@ -130,6 +130,14 @@ async fn set(args: &CommonArgs) {
         notice("Be sure to run the sync command to update Rustique's sync file to use the newly set pinned mod version.", Some(Color::Green), vec![]);
     }
 
+    if let Some(jobs) = &args.jobs {
+        config.jobs = *jobs;
+        save = true;
+
+        let shown = if *jobs == 0 { "0 (no limit)".to_string() } else { jobs.to_string() };
+        display_vec.push(command_output("config.jobs", shown));
+    }
+
     if let Some(val) = &args.show_execution_time {
 
         config.show_execution_time = *val;
@@ -207,7 +215,9 @@ async fn set(args: &CommonArgs) {
     }
 
     if save {
-        config.save(None).unwrap();
+        if let Err(e) = config.save(None) {
+            error!("Could not write your config file: {e}");
+        }
     }
 }
 
@@ -300,6 +310,12 @@ async fn del(args: &DelArgs) {
         }
     }
     
+    if args.jobs {
+        config.jobs = defaults.jobs;
+        save = true;
+        display_vec.push(command_output("config.jobs", defaults.jobs.to_string()));
+    }
+
     if args.check_for_updates {
         config.check_for_updates = true;
         save = true;
@@ -311,7 +327,9 @@ async fn del(args: &DelArgs) {
     }
     
     if save {
-        config.save(None).unwrap();
+        if let Err(e) = config.save(None) {
+            error!("Could not write your config file: {e}");
+        }
     }
 }
 
@@ -323,6 +341,7 @@ async fn list() {
         command_output("config.game_download_dir",       &config.game_download_dir),
         command_output("config.backup_mods",             config.backup_mods.to_string()),
         command_output("config.show_execution_time",     config.show_execution_time.to_string()),
+        command_output("config.jobs",                    config.jobs.to_string()),
         command_output("config.notify_of_unzipped_mods", config.notify_of_unzipped_mods.to_string()),
         command_output("config.pinned_game_version",     &config.pinned_game_version),
         command_output("config.allow_unstable",          config.allow_unstable.to_string()),

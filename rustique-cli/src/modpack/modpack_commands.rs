@@ -46,7 +46,9 @@ pub async fn parse_modpack_commands(commands: &ModpackCommands, mod_dir: impl Pa
                     // do config write things
                     let mut config = get_config().write().await;
                     config.modpacks.disabled.retain(|m| m != &mpk_id);
-                    config.save(None).unwrap();
+                    if let Err(e) = config.save(None) {
+                        error!("Could not write your config file: {e}");
+                    }
                     
                     notice(format!("{mpk_id} has been deleted successfully!"), Some(Color::Green), vec![Attribute::Bold]);
                 }

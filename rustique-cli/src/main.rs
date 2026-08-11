@@ -112,6 +112,11 @@ async fn async_main() {
         }
     }
 
+    // --jobs beats the config file, but only for this run. Nothing gets saved
+    if let Some(jobs) = cli.jobs {
+        get_config().write().await.jobs = jobs;
+    }
+
     let mod_opts: RustiqueOptions = RustiqueOptions::default();
     let mut mod_dir = mod_opts.get_mod_path().await;
     // the mods_dir from the rustique-cli takes priority from all other means, including the config file

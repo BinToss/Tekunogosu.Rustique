@@ -244,8 +244,13 @@ pub async fn cmd_list(
                         Some(prep_cell(txt + &mid, the_color, attr, None, None))
                     },
                     Ok(ListColumn::Version) => {
-                        let txt = parse_version(&mod_info.version.clone().unwrap_or_default()).unwrap().to_string();
-                        Some(prep_cell(txt.to_string(), color, attr, None, Some(CellAlignment::Right)))
+                        // a version we can't parse is still worth showing. An empty or non
+                        // numeric one used to panic here and take the whole listing down,
+                        // sync has always just warned and carried the raw string through
+                        let raw = mod_info.version.clone().unwrap_or_default();
+                        let txt = parse_version(&raw).map_or(raw, |parsed| parsed.to_string());
+
+                        Some(prep_cell(txt, color, attr, None, Some(CellAlignment::Right)))
                     },
                     Ok(ListColumn::LatestVersion) => {
                         // No need to show LatestVersion for local modpack, they are always the latest version

@@ -181,7 +181,14 @@ pub fn parse_pinned_version(mod_releases: &[Release], mod_pkg: &Package, pinned_
 
 
     let final_res = compatible_releases.iter().filter_map(|r| {
-        match parse_version(r.mod_version.as_ref().unwrap()) {
+        // modversion comes back null from the api sometimes. parse_latest_version has always
+        // handled that, unwrapping it here took the whole command down over one bad release
+        let Some(version_str) = r.mod_version.as_ref() else {
+            info!("Skipping release with no version for {:?}", r.filename);
+            return None;
+        };
+
+        match parse_version(version_str) {
             Ok(v) => Some((v, r.main_file.clone(), r.tags.clone(), r.changelog.clone())),
             Err(e) => {
                 info!("{} {}","parse_pinned_version-final_res:".bright_yellow(), e.red().bold());
