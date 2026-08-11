@@ -1,5 +1,5 @@
 use crate::commands::arg_structs::config_args::{DelArgs, CommonArgs, ConfigCommand, ConfigSubCommand};
-use rustique_core::utils::get_expanded_path;
+use rustique_core::utils::{exact_pin, get_expanded_path};
 use std::path::PathBuf;
 use std::process::exit;
 use comfy_table::{Attribute, CellAlignment, Color, ContentArrangement, Row, Table};
@@ -94,11 +94,15 @@ async fn set(args: &CommonArgs) {
 
     if let (Some(with_mod), Some(version)) = (&args.with_mod, &args.pin_version) {
 
-        if VersionReq::parse(version).is_err() {
+        // a bare 2.1.3 parses as ^2.1.3 which would still take 2.1.4 and 2.2.0. Pinning should
+        // mean that exact version, same as install modid@version does
+        let version = exact_pin(version);
+
+        if VersionReq::parse(&version).is_err() {
             notice(
                 "The version string you tried to pin is invalid. \
                  Valid operators are: <, <=, >, >=, =. \
-                 Wildcards (*) are supported for major, minor, or patch sections (e.g., '0.1.*', '0.*.0'), \
+                 Wildcards (*) are supported as the trailing section (e.g., '0.1.*'), \
                  but they cannot be used if the version includes pre-release identifiers (e.g., '-rc', '-pre', '-alpha').",
                 Some(Color::Yellow),
                 vec![Attribute::Bold]
@@ -116,7 +120,7 @@ async fn set(args: &CommonArgs) {
         }
 
         save = true;
-        display_vec.push(command_output(format!("Pinned: {with_mod}"), version));
+        display_vec.push(command_output(format!("Pinned: {with_mod}"), &version));
         notice("Be sure to run the sync command to update Rustique's sync file to use the newly set pinned mod version.", Some(Color::Green), vec![]);
     }
 

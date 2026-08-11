@@ -19,7 +19,8 @@ pub struct InstallArgs {
     #[arg(short, long, default_value = "false")]
     pub(crate) missing_dependencies: bool,
 
-    /// Reinstall a mod even if it's already in your mod directory
+    /// Reinstall a mod even if it's already in your mod directory, and ignore any pinned version
+    /// set for it in your config
     #[arg(short, long, default_value = "false")]
     pub(crate) force: bool,
    

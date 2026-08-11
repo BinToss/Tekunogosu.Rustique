@@ -6,8 +6,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::{PathBuf};
 use std::time::Instant;
 use tracing::debug;
-use tracing::span::Attributes;
-use rustique_core::config::config_manager::get_config;
+use rustique_core::config::config_manager::with_config;
 use rustique_core::information_utils::{display_installation_results, elapsed_footer, notice};
 use rustique_core::sync_structs::ModSyncInfo;
 use rustique_core::traits::ref_ext::PathRef;
@@ -20,7 +19,8 @@ use rustique_core::aliases::ModID;
 pub async fn update_mods<V: AsRef<[ModID]>>(mod_dir: impl PathRef, update_mod_ids: V, keep_old_files: bool) -> Result<(), RustiqueError> {
     let (mod_dir, update_mod_ids) = (mod_dir.as_ref(), update_mod_ids.as_ref());
     let start_time = Instant::now();
-    let config = get_config().read().await;
+    // get_sync_data and install_manager both take their own read guard, don't hold one over them
+    let (backup_mods, show_execution_time) = with_config(|c| (c.backup_mods, c.show_execution_time)).await;
     let sync_data = get_sync_data(&PathBuf::from(mod_dir), false).await?;
     
     notice("Updating mods...", Option::from(Color::Yellow), vec![Attribute::Bold]);
@@ -97,8 +97,8 @@ pub async fn update_mods<V: AsRef<[ModID]>>(mod_dir: impl PathRef, update_mod_id
 
     let mods_processed: Vec<Installed> = install_manager(mod_dir, final_mod_update_list, installed_mods).await?;
     
-    if config.backup_mods {
-        backup_older_files(&mods_processed).await?;        
+    if backup_mods {
+        backup_older_files(&mods_processed).await?;
     }
     
     if !keep_old_files {
@@ -108,7 +108,7 @@ pub async fn update_mods<V: AsRef<[ModID]>>(mod_dir: impl PathRef, update_mod_id
     display_installation_results(mods_processed);
 
 
-    if config.show_execution_time {
+    if show_execution_time {
         elapsed_footer(start_time, "Update");
     }
 

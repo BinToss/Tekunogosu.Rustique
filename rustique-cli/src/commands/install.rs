@@ -10,9 +10,20 @@ use rustique_core::rustique_errors::RustiqueError::SimpleError;
 use rustique_core::utils::{extract_all_mods_metadata, gather_missing_dependencies, split_modid_version};
 use rustique_core::version_management::{parse_latest_version, parse_pinned_version};
 use tracing::{debug, info};
-use rustique_core::config::config_manager::{get_config, Package};
+use rustique_core::config::config_manager::{with_config, Package};
 use rustique_core::information_utils::{command_output, display_incompatible_mods_constraint, display_installation_results, display_table, notice};
 use rustique_core::traits::ref_ext::PathRef;
+
+/// ANDs a version typed on the command line together with the mod's config pin so both have to
+/// hold. semver won't let a bare * sit alongside another comparator, and * means "any version"
+/// anyway, so there the pin just stands on its own.
+fn combine_pins(cli_version: &str, config_pin: &str) -> String {
+    if cli_version.trim() == "*" {
+        config_pin.to_string()
+    } else {
+        format!("{cli_version}, {config_pin}")
+    }
+}
 
 // Report if trying install a mod that already exists
 // Use -f to force an installation
@@ -30,8 +41,11 @@ pub async fn install_cmd(mod_dir: impl PathRef, mods_requested: Vec<ModID>, forc
     // get sync data
     let sync_data = get_sync_data(mod_dir, true).await?;
     
-    let config = get_config().read().await;
-    
+    // install_manager takes its own read guard further down, don't still be holding one
+    let (config_pkgs, pinned_game_version, allow_unstable) = with_config(|c| {
+        (c.pkg.clone(), c.pinned_game_version.clone(), c.allow_unstable)
+    }).await;
+
     let installed_mods = sync_data.rustique_sync.clone();
 
     // no point burning api calls and a download on something already sitting in the mod dir.
@@ -71,22 +85,20 @@ pub async fn install_cmd(mod_dir: impl PathRef, mods_requested: Vec<ModID>, forc
         result.into_iter().filter_map(|(mod_id, mod_info)| {
             let mod_id = mod_id.to_lowercase();
             // println!("Trying to install {mod_id}");
-            let pinned_version = if let Some(mod_version) =  mod_map.get(&mod_id) {
-                if mod_version.is_some() {
-                    // println!("Mod {mod_id} version found {}", mod_version.clone().unwrap());
-                    
-                    Some(mod_version.clone().unwrap())
-                } else if let Some(package) = config.pkg.iter().find(|package| package.mod_id == mod_id) {
-                    // println!("Mod {mod_id} package found {package:?}");
-                    package.pinned_version.clone()
-                } else {
-                    None
-                }
-            } else {
-                None
+            let cli_version = mod_map.get(&mod_id).cloned().flatten();
+            let config_pin = config_pkgs.iter()
+                .find(|package| package.mod_id == mod_id)
+                .and_then(|package| package.pinned_version.clone());
+
+            // a version typed on the command line doesn't get to walk over a config pin. If it did
+            // we'd put a version on disk that the next sync and update quietly reverts back to the
+            // pin anyway. Both conditions have to hold, and -f is the way out
+            let pinned_version = match (&cli_version, &config_pin) {
+                (Some(cli), Some(pin)) if !force => Some(combine_pins(cli, pin)),
+                (Some(cli), _) => Some(cli.clone()),
+                (None, _) => config_pin.clone(),
             };
-            
-            
+
             let pkg = Package {
                 mod_id: mod_id.clone(),
                 pinned_version,
@@ -94,13 +106,26 @@ pub async fn install_cmd(mod_dir: impl PathRef, mods_requested: Vec<ModID>, forc
             
             info!("pkg: {:?}", pkg);
             
-            let pinned_game_ver = &config.pinned_game_version;
-            
-            let (version, download_url, _,_) = match parse_pinned_version(&mod_info.mod_json.releases, &pkg, pinned_game_ver, config.allow_unstable) {
+            let pinned_game_ver = pinned_game_version.as_str();
+
+            let (version, download_url, _,_) = match parse_pinned_version(&mod_info.mod_json.releases, &pkg, pinned_game_ver, allow_unstable) {
                 Ok(pv) => pv,
                 Err(e) => {
                     let mod_str = format!("{}\t- {}", &mod_info.mod_json.mod_id, &mod_info.mod_json.name.clone().unwrap_or(String::new()));
-                    no_compatible_mods.push(String::from(mod_str.trim()));
+
+                    // if they asked for a version and this mod is pinned, the pin is almost always
+                    // the real reason. Say that instead of the generic constraints message
+                    let reason = match (&cli_version, &config_pin) {
+                        (Some(cli), Some(pin)) if !force => format!(
+                            "pinned to {pin} in your config, which {cli} can't satisfy.\n\
+                             Repin with [rustique config set -P <version> -w {mod_id}], clear it with \
+                             [rustique config del -P {mod_id}], or use -f to override it just this once."
+                        ),
+                        _ => e.to_string(),
+                    };
+
+                    // show the reason in the table, on its own it only ever reached the logs
+                    no_compatible_mods.push(format!("{}\n{}", mod_str.trim(), reason));
                     info!("Incompatible mod constraints for {mod_str} {e}");
 
                     return None
@@ -146,6 +171,8 @@ pub async fn install_missing_deps<V: AsRef<[ModID]>>(mod_dir_for_req: impl PathR
     // retrieve all dependencies
     // send missing ones to install_manager()
 
+    let allow_unstable = with_config(|c| c.allow_unstable).await;
+
     let installed_mods = extract_all_mods_metadata(mod_dir, true).await?;
     // both "what's missing" and the resolver seed get judged against where the deps actually
     // land, which isn't the same dir we searched for the requesting mods when modpacks call this.
@@ -178,7 +205,7 @@ pub async fn install_missing_deps<V: AsRef<[ModID]>>(mod_dir_for_req: impl PathR
     for mod_info in &mut missing_deps {
         if let Some(data) = result.get(&mod_info.mod_id) {
             mod_info.mod_name = data.mod_json.name.clone().unwrap_or_default();
-            let (version, download_url, _,_) = parse_latest_version(&data.mod_json.releases);
+            let (version, download_url, _,_) = parse_latest_version(&data.mod_json.releases, allow_unstable);
             mod_info.download_url = download_url;
             mod_info.version_to_install = version;
         }

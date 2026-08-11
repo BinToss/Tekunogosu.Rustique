@@ -229,7 +229,8 @@ async fn async_main() {
         }
         Commands::Install(args) => {
             let start_time = Instant::now();
-            let config = get_config().read().await;
+            // install_cmd and install_missing_deps take their own read guard, don't hold one across them
+            let show_execution_time = get_config().read().await.show_execution_time;
 
             if !args.mod_ids.is_empty() {
                 match install_cmd(&mod_dir, args.mod_ids.clone(), args.force).await {
@@ -253,7 +254,7 @@ async fn async_main() {
                 }
             }
 
-            if config.show_execution_time {
+            if show_execution_time {
                 elapsed_footer(start_time, "Install");
             }
            

@@ -11,7 +11,7 @@ use comfy_table::{Attribute, Color};
 use futures::stream::{self, StreamExt};
 use indicatif::MultiProgress;
 use tracing::{error, info};
-use crate::config::config_manager::{get_config, Package};
+use crate::config::config_manager::{with_config, Package};
 use crate::consts::FILE_MODINFO_JSON;
 use crate::information_utils::notice;
 use crate::sync_structs::ModSyncInfo;
@@ -87,7 +87,12 @@ pub async fn resolve_dependencies(
     client: &ApiClient,
     mp: &MultiProgress,
 ) -> Result<(DependencyGraph, Vec<Installed>), RustiqueError> {
-    let config = get_config().read().await;
+    // grab what we need up front. Holding the guard across every download and api call below
+    // would block any writer for the whole run and deadlock us if one ever queues up
+    let (pkgs, pinned_game_version, allow_unstable) = with_config(|c| {
+        (c.pkg.clone(), c.pinned_game_version.clone(), c.allow_unstable)
+    }).await;
+
     let mut graph: DependencyGraph = HashMap::new();
     let mut queue: VecDeque<Install> = VecDeque::new();
     let mut all_installed: Vec<Installed> = Vec::new();
@@ -209,7 +214,7 @@ pub async fn resolve_dependencies(
                     &api_mod.mod_json.mod_id.clone().to_string()
                 };
 
-                let pkg = match config.pkg.iter().find(|p| p.mod_id.eq(mod_id)) {
+                let pkg = match pkgs.iter().find(|p| p.mod_id.eq(mod_id)) {
                     Some(p) => p.clone(),
                     _ => {Package::default()}
                 };
@@ -217,8 +222,8 @@ pub async fn resolve_dependencies(
                 let (version, url, _, _) =
                     match parse_pinned_version(&api_mod.mod_json.releases,
                                                &pkg.clone(),
-                                               config.pinned_game_version.as_str(),
-                                               config.allow_unstable) {
+                                               pinned_game_version.as_str(),
+                                               allow_unstable) {
                         Ok(pv) => pv,
                         Err(e) => {
                             notice(format!("Unable to locate compatible versions for {} -- {}", dep_id, e), Some(Color::Red), vec![Attribute::Bold]);

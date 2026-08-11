@@ -9,7 +9,7 @@ use rustique_core::aliases::{ModID, ModVersion};
 use rustique_core::api::api_structs::ModInfo;
 use rustique_core::api::client::ApiClient;
 use rustique_core::api::download::download_requested_mods;
-use rustique_core::config::config_manager::{Package, get_config};
+use rustique_core::config::config_manager::{Package, get_config, with_config};
 use rustique_core::consts::FILE_MODINFO_JSON;
 use rustique_core::information_utils::{command_output, display_table, elapsed_footer, notice};
 use rustique_core::install_manager::{Install, install_manager, Installed};
@@ -40,11 +40,14 @@ pub async fn mp_install(mp_id: ModID, mp_version: Option<ModVersion>) -> Result<
     // Save the modpack.zip (the modpack from the mods website) to modpacks/packs
     // Once the modpack is installed, it will download all the mods associated with the modpack  
     // to the location [modpacks/installed/modpack_id/*] 
-    let config = get_config().read().await;
-    
-    check_if_mp_enabled(&mp_id, &config.modpacks.enabled);
+    // install_manager and sync both take their own read guard below, so grab what we need and let go
+    let (modpack_dir, enabled_packs, allow_unstable) = with_config(|c| {
+        (c.modpacks.modpack_dir.clone(), c.modpacks.enabled.clone(), c.allow_unstable)
+    }).await;
 
-    let packs_path = Path::new(&config.modpacks.modpack_dir).join("mypacks");
+    check_if_mp_enabled(&mp_id, &enabled_packs);
+
+    let packs_path = Path::new(&modpack_dir).join("mypacks");
     let local_packs = extract_all_mods_metadata(&packs_path, false)
         .await
         .unwrap_or_default();
@@ -52,8 +55,8 @@ pub async fn mp_install(mp_id: ModID, mp_version: Option<ModVersion>) -> Result<
         .iter().find(|(_, info)| info.mod_id.eq_ignore_ascii_case(&mp_id));
 
     let client = ApiClient::new();
-    let installed_dir = Path::new(&config.modpacks.modpack_dir).join("installed");
-    let packs_dir = Path::new(&config.modpacks.modpack_dir).join("packs");
+    let installed_dir = Path::new(&modpack_dir).join("installed");
+    let packs_dir = Path::new(&modpack_dir).join("packs");
 
 
     let modpack = if found_local_packs.is_some() {
@@ -67,7 +70,7 @@ pub async fn mp_install(mp_id: ModID, mp_version: Option<ModVersion>) -> Result<
         Installed {
             mod_id: mp_id.clone(),
             mod_name: local_pack.1.name.clone(),
-            installed_file_path: Some(Path::new(&config.modpacks.modpack_dir)
+            installed_file_path: Some(Path::new(&modpack_dir)
                 .join("mypacks").join(modpack_filename)),
             old_file_path: None,
             install_version: local_pack.1.version.clone().unwrap_or("0.1.0".into()),
@@ -82,13 +85,13 @@ pub async fn mp_install(mp_id: ModID, mp_version: Option<ModVersion>) -> Result<
                 mod_id: mp_id.clone(),
                 pinned_version: Some(pin_version),
             };
-            match parse_pinned_version(&mod_info.mod_json.releases, &pkg, "", config.allow_unstable) {
+            match parse_pinned_version(&mod_info.mod_json.releases, &pkg, "", allow_unstable) {
                 Ok(pv) => pv,
                 Err(e) => return Err(e)
             }
         } else {
             debug!("Parsing latest version..");
-            parse_latest_version(&mod_info.mod_json.releases)
+            parse_latest_version(&mod_info.mod_json.releases, allow_unstable)
         };
 
         info!("version: {}, download_url {}", version, download_url);
@@ -116,7 +119,7 @@ pub async fn mp_install(mp_id: ModID, mp_version: Option<ModVersion>) -> Result<
         
         // do another check if the IDs are different, user might have installed using the numerical ID
         if !modpack_info.mod_id.eq_ignore_ascii_case(&mp_id) {
-            check_if_mp_enabled(&modpack_info.mod_id, &config.modpacks.enabled);
+            check_if_mp_enabled(&modpack_info.mod_id, &enabled_packs);
         }
 
         // The modpack is installed to the correct place, install all dependencies

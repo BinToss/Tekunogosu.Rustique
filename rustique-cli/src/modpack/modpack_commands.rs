@@ -4,7 +4,7 @@ use comfy_table::{Attribute, Color};
 use comfy_table::presets::UTF8_HORIZONTAL_ONLY;
 use tracing::{error, info, warn};
 use owo_colors::OwoColorize;
-use rustique_core::config::config_manager::get_config;
+use rustique_core::config::config_manager::{get_config, with_config};
 use rustique_core::information_utils::{command_output, display_table, notice};
 use rustique_core::traits::ref_ext::PathRef;
 use crate::commands::arg_structs::modpack_args::{MPLocalSubCommands, ModpackCommands, ModpackSubCommands};
@@ -130,8 +130,9 @@ pub async fn parse_modpack_commands(commands: &ModpackCommands, mod_dir: impl Pa
             }
         }
         ModpackSubCommands::List(args) => {
-            let config = get_config().read().await;
-            let packs_path = Path::new(&config.modpacks.modpack_dir).join("packs");
+            // cmd_list takes its own read guard, don't hold one across it
+            let modpack_dir = with_config(|c| c.modpacks.modpack_dir.clone()).await;
+            let packs_path = Path::new(&modpack_dir).join("packs");
             match cmd_list(&packs_path, args.updates, false, true, false, args.export_args.columns.clone(), args.export_args.export_as.clone(), args.export_args.file_path.clone()).await {
                 Ok(()) => {}
                 Err(e) => {
@@ -157,8 +158,9 @@ pub async fn parse_modpack_commands(commands: &ModpackCommands, mod_dir: impl Pa
             }
         }
         ModpackSubCommands::Sync => {
-            let config = get_config().read().await;
-            let mp_dir = Path::new(&config.modpacks.modpack_dir).join("packs");
+            // handle_sync_call takes its own read guard, don't hold one across it
+            let modpack_dir = with_config(|c| c.modpacks.modpack_dir.clone()).await;
+            let mp_dir = Path::new(&modpack_dir).join("packs");
 
             handle_sync_call(&mp_dir, false).await;
         }
@@ -166,9 +168,10 @@ pub async fn parse_modpack_commands(commands: &ModpackCommands, mod_dir: impl Pa
         ModpackSubCommands::Local(args) => {
             match &args.subcommands {
                 MPLocalSubCommands::List(largs) => {
-                    let config = get_config().read().await;
-                    let packs_path = Path::new(&config.modpacks.modpack_dir).join("mypacks");
-                    
+                    // cmd_list takes its own read guard, don't hold one across it
+                    let modpack_dir = with_config(|c| c.modpacks.modpack_dir.clone()).await;
+                    let packs_path = Path::new(&modpack_dir).join("mypacks");
+
                     match cmd_list(&packs_path,false, false, true, true, largs.output_commands.columns.clone(), largs.output_commands.export_as.clone(), largs.output_commands.file_path.clone()).await {
                         Ok(()) => {}
                         Err(e) => {

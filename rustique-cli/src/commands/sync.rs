@@ -8,7 +8,7 @@ use comfy_table::presets::UTF8_HORIZONTAL_ONLY;
 use tracing::{debug, error, info, warn};
 use owo_colors::OwoColorize;
 use rustique_core::aliases::{ModID, PinnedVersionInfo};
-use rustique_core::config::config_manager::{get_config, Config, Package};
+use rustique_core::config::config_manager::{with_config, Config, Package};
 use rustique_core::consts::{FILE_GAME_VERSION_SYNC, FILE_MOD_SEARCH_SYNC, FILE_RUSTIQUE_SYNC};
 use rustique_core::information_utils::{display_incompatible_mods_constraint, display_table, elapsed_footer, notice, CellData};
 use rustique_core::symlink_manager::SymlinkManager;
@@ -38,7 +38,16 @@ pub async fn get_sync_data(mod_dir: impl PathRef, quiet: bool) -> Result<Rustiqu
 pub async fn sync<V: AsRef<[Package]>>(mod_dir: impl PathRef, quiet: bool, pin_versions: V) -> Result<RustiqueSyncJson, RustiqueError> {
     let mod_dir = mod_dir.as_ref();
     let start_time = Instant::now();
-    let config = get_config().read().await;
+    // daily_file_syncs takes its own read guard, so we can't still be holding one when we call it
+    let (config_pkgs, pinned_game_version, allow_unstable, search_sync_time, show_execution_time) =
+        with_config(|c| (
+            c.pkg.clone(),
+            c.pinned_game_version.clone(),
+            c.allow_unstable,
+            c.sync_mod_search_file_every,
+            c.show_execution_time,
+        )).await;
+
     daily_file_syncs(false).await?;
 
     // notice(format!("Syncing {}...", mod_dir.display().fg::<Magenta>()), Option::from(comfy_table::Color::Yellow), vec![Attribute::Bold]);
@@ -86,8 +95,6 @@ pub async fn sync<V: AsRef<[Package]>>(mod_dir: impl PathRef, quiet: bool, pin_v
         }
     };
 
-    let search_sync_time = config.sync_mod_search_file_every;
-    
     if timestamp_older_than(search_sync_time, &mods_search_data.last_sync) {
         // update the database
         daily_file_syncs(true).await?;
@@ -181,27 +188,37 @@ pub async fn sync<V: AsRef<[Package]>>(mod_dir: impl PathRef, quiet: bool, pin_v
         let mod_asset_id = res_mod.mod_json.asset_id;
         
         let pkg = if pin_versions.as_ref().is_empty() {
-            config.pkg.iter().find(|p| p.mod_id.eq(&mod_id)).cloned().unwrap_or_default()
+            config_pkgs.iter().find(|p| p.mod_id.eq(&mod_id)).cloned().unwrap_or_default()
         } else {
             pin_versions.as_ref().iter().find(|p| p.mod_id.eq(&mod_id)).cloned().unwrap_or_default()
         };
 
         info!("pkg in sync: {:?}", pkg);
-        
-        let (mod_version, download_url, game_versions, changelog) = if !pkg.mod_id.is_empty() || !config.pinned_game_version.is_empty() {
+
+        let (mod_version, download_url, game_versions, changelog) = if !pkg.mod_id.is_empty() || !pinned_game_version.is_empty() {
             info!("{} {}","Parsing pinned versions for".yellow(), mod_id.blue());
-            match parse_pinned_version(&res_mod.mod_json.releases, &pkg, config.pinned_game_version.as_str(), config.allow_unstable) {
+            match parse_pinned_version(&res_mod.mod_json.releases, &pkg, pinned_game_version.as_str(), allow_unstable) {
                 Ok(pv) => pv,
                 Err(e) => {
-                    no_compatible_mods.push(format!("ModID: {mod_id} - AssetID: {mod_asset_id}"));
+                    // same as install, the reason is worth showing and not just logging
+                    no_compatible_mods.push(format!("ModID: {mod_id} - AssetID: {mod_asset_id}\n{e}"));
                     info!("Unable to find compatible version for {mod_id}. {e}");
                     continue
                 }
             }
         } else {
             info!("{} {}", "Parsing latest versions for".yellow(), mod_id.blue());
-            parse_latest_version(&res_mod.mod_json.releases)
+            parse_latest_version(&res_mod.mod_json.releases, allow_unstable)
         };
+
+        // an empty version means nothing usable came back, usually every release is unstable and
+        // allow_unstable is off. Writing that to the sync file makes update think there's an
+        // update forever and try to download from an empty url
+        if mod_version.is_empty() {
+            no_compatible_mods.push(format!("ModID: {mod_id} - AssetID: {mod_asset_id}"));
+            info!("No usable version found for {mod_id}, skipping");
+            continue
+        }
 
         sync_data
             .rustique_sync
@@ -230,7 +247,7 @@ pub async fn sync<V: AsRef<[Package]>>(mod_dir: impl PathRef, quiet: bool, pin_v
 
     sync_data.save(sync_file_path).await?;
    
-    if config.show_execution_time && !quiet {
+    if show_execution_time && !quiet {
         elapsed_footer(start_time, "Sync");
     }
 
@@ -240,7 +257,7 @@ pub async fn sync<V: AsRef<[Package]>>(mod_dir: impl PathRef, quiet: bool, pin_v
 
 pub async fn daily_file_syncs(force: bool) -> Result<ModsSearchFile, RustiqueError> {
 
-    let config = get_config().read().await;
+    let (sync_time, show_execution_time) = with_config(|c| (c.sync_mod_search_file_every, c.show_execution_time)).await;
     let start_time = Instant::now();
 
     let config_dir = Config::get_path();
@@ -265,8 +282,6 @@ pub async fn daily_file_syncs(force: bool) -> Result<ModsSearchFile, RustiqueErr
         ModsSearchFile::new()
     };
 
-    let sync_time = config.sync_mod_search_file_every;
-
     if file_data.mods.is_empty() || force || timestamp_older_than(sync_time, &file_data.last_sync){
 
         notice("Daily Search Sync...", Some(Color::Yellow), vec![Attribute::Bold]);
@@ -286,7 +301,7 @@ pub async fn daily_file_syncs(force: bool) -> Result<ModsSearchFile, RustiqueErr
         info!("{}", "Mods Search Sync file written successfully".green());
     }
 
-    if config.show_execution_time && force {
+    if show_execution_time && force {
         elapsed_footer(start_time, "Mods Search Sync");
     }
 

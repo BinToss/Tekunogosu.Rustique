@@ -7,7 +7,7 @@ use rustique_core::aliases::ModID;
 use rustique_core::api::api_structs::ModInfo;
 use rustique_core::api::client::ApiClient;
 use rustique_core::api::download::download_requested_mods;
-use rustique_core::config::config_manager::{get_config, Package};
+use rustique_core::config::config_manager::{with_config, Package};
 use rustique_core::consts::FILE_MODINFO_JSON;
 use rustique_core::information_utils::notice;
 use rustique_core::install_manager::Install;
@@ -21,13 +21,14 @@ use crate::modpack::mp_install::check_if_mp_enabled;
 
 pub async fn mp_update(args: MPUpdateArgs) -> Result<(), RustiqueError> {
 
-    let config = get_config().read().await;
-   
+    // get_sync_data, sync and update_mods all take their own read guard below
+    let (modpack_dir, enabled_packs) = with_config(|c| (c.modpacks.modpack_dir.clone(), c.modpacks.enabled.clone())).await;
+
     // Make sure the modpack isn't enabled or we'll have orphaned symlinks
-    check_if_mp_enabled(&args.mpk_id, &config.modpacks.enabled);
-    
-    
-    let modpack_base_dir = Path::new(&config.modpacks.modpack_dir);
+    check_if_mp_enabled(&args.mpk_id, &enabled_packs);
+
+
+    let modpack_base_dir = Path::new(&modpack_dir);
     let pack_dir = modpack_base_dir.join("packs");
     
     let modpack_sync_file = get_sync_data(&pack_dir, false).await?;

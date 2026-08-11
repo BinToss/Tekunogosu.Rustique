@@ -1,7 +1,7 @@
 use crate::aliases::{ModFileName, ModID, ModVersion};
 use crate::api::api_structs::{ModApi, ModInfo};
 use crate::config::config_manager::Config;
-use crate::config::config_manager::get_config;
+use crate::config::config_manager::{get_config, with_config};
 use crate::consts::{FILE_GAME_VERSION_SYNC, FILE_MODINFO_JSON, FILE_RUSTIQUE_SYNC};
 use crate::information_utils::{CellData, display_table, notice};
 use crate::install_manager::{Install, Installed};
@@ -463,8 +463,9 @@ pub async fn remove_older_files(processed_install: &[Installed]) -> Result<(), R
 }
 
 pub async fn backup_older_files(processed_install: &[Installed]) -> Result<(), RustiqueError> {
-    let config = get_config().read().await;
-    let backup_dir = Path::new(&config.backup_mods_dir);
+    // update_mods calls this while it may still be holding a guard of its own, so don't take one
+    let backup_mods_dir = with_config(|c| c.backup_mods_dir.clone()).await;
+    let backup_dir = Path::new(&backup_mods_dir);
 
     if !backup_dir.exists() {
         tokio::fs::create_dir_all(backup_dir).await?;
@@ -513,9 +514,7 @@ pub fn split_modid_version(mod_id_str: impl StrRef) -> (ModID, Option<ModVersion
         .unwrap_or(mod_id_str.as_ref())
         .split_once('@')
     {
-         let version = if !has_semver_operator(version) {
-            format!("={version}")
-        } else { version.to_string() };
+        let version = exact_pin(version);
 
         let p_ver = match VersionReq::parse(&version) {
             Ok(v) => v,
@@ -544,6 +543,23 @@ pub fn has_semver_operator(s: &str) -> bool {
     matches!(s.chars().next(), Some('^' | '<' | '>' | '=' | '~')) ||
     s.starts_with("<=") ||
     s.starts_with(">=")
+}
+
+/// True when the string already expresses a range so sticking = on the front would be wrong.
+/// Wildcards count here too, =* isn't even valid semver.
+pub fn is_semver_range(s: &str) -> bool {
+    has_semver_operator(s) || s.contains('*')
+}
+
+/// Turns a bare 2.1.3 into =2.1.3 so a pin means that exact version. Left alone it parses as
+/// ^2.1.3 and happily takes 2.1.4 or 2.2.0, which isn't what pinning means to anyone.
+/// Anything the user already wrote as a range is passed straight through.
+pub fn exact_pin(version: &str) -> String {
+    if is_semver_range(version) {
+        version.to_string()
+    } else {
+        format!("={version}")
+    }
 }
 
 pub fn format_for_csv(input: impl StrRef) -> String {

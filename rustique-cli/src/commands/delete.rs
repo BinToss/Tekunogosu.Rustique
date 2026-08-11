@@ -7,7 +7,7 @@ use tracing::{info, warn};
 use rustique_core::aliases::{ModFileName, ModID, ModVersion};
 use crate::commands::arg_structs::delete_args::DeleteArgAllVals;
 use crate::commands::sync::get_sync_data;
-use rustique_core::config::config_manager::get_config;
+use rustique_core::config::config_manager::with_config;
 use rustique_core::consts::FILE_RUSTIQUE_SYNC;
 use rustique_core::information_utils::{display_table, notice, CellData};
 use rustique_core::symlink_manager::SymlinkManager;
@@ -17,9 +17,9 @@ use rustique_core::utils::{delete_file, extract_all_mods_metadata, split_modid_v
 use rustique_core::version_management::compare_versions;
 
 pub async fn delete_all(mod_dir: impl PathRef, delete_type: &DeleteArgAllVals) -> Result<(), RustiqueError> {
-    
-    let config = get_config().read().await;
-    
+
+    let backup_mods_dir = with_config(|c| c.backup_mods_dir.clone()).await;
+
    
     // location_type: Mods looks at the folder specified by mod_dir
     // location_type: Backups looks at the backup dir in the config
@@ -38,7 +38,7 @@ pub async fn delete_all(mod_dir: impl PathRef, delete_type: &DeleteArgAllVals) -
     
     if matches!(delete_type, DeleteArgAllVals::Backups) || matches!(delete_type, DeleteArgAllVals::Both) {
        
-        let mut mods = tokio::fs::read_dir(Path::new(&config.backup_mods_dir)).await?;
+        let mut mods = tokio::fs::read_dir(Path::new(&backup_mods_dir)).await?;
         iterate_and_delete(&mut mods, &mut cleaned_mods).await?;
     }
     
@@ -83,14 +83,15 @@ pub async fn iterate_and_move_zip(curr_items: &mut ReadDir, target_dir: impl Pat
 
 pub async fn delete_cmd(mod_dir: impl PathRef, mod_ids: Vec<ModID>, is_backup: bool) -> Result<(), RustiqueError> {
     
-    let config = get_config().read().await;
-   
+    // get_sync_data takes its own read guard further down, don't still be holding one
+    let backup_mods_dir = with_config(|c| c.backup_mods_dir.clone()).await;
+
     let mod_lookup: HashMap<ModID, Option<ModVersion>> = mod_ids.iter().map(split_modid_version).collect();
-   
+
     info!("mod_lookup {:?}", mod_lookup);
-    
+
     let mod_dir = if is_backup {
-        Path::new(&config.backup_mods_dir)
+        Path::new(&backup_mods_dir)
     } else {
         mod_dir.as_ref()
     };

@@ -28,8 +28,7 @@ pub struct LatestVersionFound {
     pub changelog: Option<String>,
 }
 
-// TODO: Needs to follow the config.allow_unstable option just as the parse_pinned_version method does.
-pub fn parse_latest_version(releases: &[Release]) -> PinnedVersionInfo {
+pub fn parse_latest_version(releases: &[Release], allow_unstable: bool) -> PinnedVersionInfo {
     let mut errors :Vec<RustiqueError> = Vec::new();
 
     // TODO: Review for version pinning, the error needs to be handled better for that
@@ -43,7 +42,15 @@ pub fn parse_latest_version(releases: &[Release]) -> PinnedVersionInfo {
             // Check if this mod has a pinned version and return the max by that version
             // only clone when passing to parse_version if required
             match parse_version(&version_str.clone()) {
-                Ok(version) => Some((version, release.main_file.clone(), release.tags.clone(), release.changelog.clone())),
+                Ok(version) => {
+                    // same rule parse_pinned_version goes by, a non empty pre is -rc/-pre/-alpha etc
+                    if !version.pre.is_empty() && !allow_unstable {
+                        debug!("Skipping unstable {version}");
+                        return None;
+                    }
+
+                    Some((version, release.main_file.clone(), release.tags.clone(), release.changelog.clone()))
+                },
                 Err(e) => {
                     errors.push(e);
                     None
@@ -129,24 +136,46 @@ pub fn parse_pinned_version(mod_releases: &[Release], mod_pkg: &Package, pinned_
     // filter once
     // iterate through releases
     // check if release is valid against the pinned game version AND against the pinned mod version from the mod_config_pkg
-    let compatible_releases : Vec<Release> =  mod_releases.iter().filter(|release| {
-        // check for pinned game version compatibility
+    // one place that decides whether a release passes, so the retry below can't drift from it
+    let release_matches = |release: &Release, allow_unstable: bool| {
+        // a pre-release only ever counts when unstable is allowed. This has to be checked on its
+        // own because with no pins at all neither branch below runs and the -rc would sail through
+        let version_is_pre = release.mod_version.as_deref()
+            .and_then(|v| parse_version(v).ok())
+            .is_some_and(|v| !v.pre.is_empty());
 
+        if version_is_pre && !allow_unstable {
+            return false;
+        }
+
+        // check for pinned game version compatibility
         let compatible_with_pinned_game_version = if check_pinned_game_version {
             find_compatible_versions(&parsed_pinned_game_version, release.tags.clone(), allow_unstable).unwrap_or(false)
         } else { true };
 
+        // check for pinned mod version compatibility
         let compatible_with_pinned_mod_version = if check_pinned_mod_version {
             find_compatible_versions(&parsed_pinned_mod_version, vec![release.mod_version.clone().unwrap_or("0.0.0".into())], allow_unstable).unwrap_or(false)
         } else { true };
 
         compatible_with_pinned_game_version && compatible_with_pinned_mod_version
-        // check for pinned mod version compatibility
-    }).cloned().collect();
+    };
+
+    // filter once
+    // iterate through releases
+    // check if release is valid against the pinned game version AND against the pinned mod version from the mod_config_pkg
+    let compatible_releases : Vec<Release> =  mod_releases.iter()
+        .filter(|release| release_matches(release, allow_unstable))
+        .cloned()
+        .collect();
 
     info!("compatible_releases: {:?}", compatible_releases);
 
     if compatible_releases.is_empty() {
+        if !allow_unstable && mod_releases.iter().any(|release| release_matches(release, true)) {
+            return Err(RustiqueError::NoVersionFound("only pre-release versions match, set allow-unstable = true in config".into()))
+        }
+
         return Err(RustiqueError::NoVersionFound("Compatible versions not found based on pinned conditions".into()))
     }
 
@@ -210,6 +239,11 @@ fn find_compatible_versions(parsed_condition: &VersionReq, versions_to_check: Ve
     //     }
     // };
 
+    // semver only matches a pre-release version when the condition carries a pre-release on the
+    // same major.minor.patch, which is the whole reason for the strip below. If the user pinned an
+    // explicit -rc then the compare already works as is, and stripping makes the pin unsatisfiable
+    let condition_has_pre = parsed_condition.comparators.iter().any(|c| !c.pre.is_empty());
+
     let matches: Vec<Version> = versions_to_check.iter().filter_map(|v_str| {
         let parsed_v = match lenient_semver::parse(v_str) {
             Ok(v) => v,
@@ -224,7 +258,7 @@ fn find_compatible_versions(parsed_condition: &VersionReq, versions_to_check: Ve
             return None
         }
 
-        let check_version = if !parsed_v.pre.is_empty() && allow_unstable {
+        let check_version = if !parsed_v.pre.is_empty() && allow_unstable && !condition_has_pre {
             // strip the pre-releases to check against major.minor.patch
             match Version::parse(&format!("{}.{}.{}", parsed_v.major, parsed_v.minor, parsed_v.patch)) {
                 Ok(stripped) => stripped,
