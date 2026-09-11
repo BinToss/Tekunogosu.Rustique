@@ -1,12 +1,11 @@
 use crate::commands::arg_structs::config_args::{DelArgs, CommonArgs, ConfigCommand, ConfigSubCommand};
-use rustique_core::utils::get_expanded_path;
+use rustique_core::utils::{get_expanded_path, pin_version};
 use std::path::PathBuf;
 use std::process::exit;
 use comfy_table::{Attribute, CellAlignment, Color, ContentArrangement, Row, Table};
-use comfy_table::modifiers::UTF8_ROUND_CORNERS;
 use comfy_table::presets::{UTF8_FULL_CONDENSED};
 use semver::VersionReq;
-use tracing::{warn};
+use tracing::{error, warn};
 use crate::commands::config_table::config_table;
 use rustique_core::config::config_manager::{get_config, Config, Package};
 use rustique_core::config::config_structs::{CellAttr, CellColor};
@@ -68,11 +67,16 @@ async fn set(args: &CommonArgs) {
     }
 
     if let Some(version) = &args.pin_game_version {
-        if VersionReq::parse(version).is_err() {
+
+        // 1.21 on its own parses as ^1.21 and would take 1.22, which isn't a pin. Same treatment
+        // the mod pins get: full major.minor.patch means that exact build, shorter keeps the patch open
+        let version = pin_version(version);
+
+        if VersionReq::parse(&version).is_err() {
             notice(
                 "The version string you tried to pin is invalid. \
                  Valid operators are: <, <=, >, >=, =. \
-                 Wildcards (*) are supported for major, minor, or patch sections (e.g., '1.22.*'), \
+                 Wildcards (*) are supported as the trailing section (e.g., '1.22.*'), \
                  but they cannot be used if the version includes pre-release identifiers (e.g., '-rc', '-pre', '-alpha').",
                 Some(Color::Yellow),
                 vec![Attribute::Bold]
@@ -81,9 +85,9 @@ async fn set(args: &CommonArgs) {
             return
         }
 
-        config.pinned_game_version.clone_from(version);
+        config.pinned_game_version.clone_from(&version);
         save = true;
-        display_vec.push(command_output("config.pinned_game_version", version));
+        display_vec.push(command_output("config.pinned_game_version", &version));
     }
 
     if let Some(allow_unstable ) = &args.allow_unstable {
@@ -94,11 +98,15 @@ async fn set(args: &CommonArgs) {
 
     if let (Some(with_mod), Some(version)) = (&args.with_mod, &args.pin_version) {
 
-        if VersionReq::parse(version).is_err() {
+        // a bare 2.1.3 parses as ^2.1.3 which would still take 2.1.4 and 2.2.0. Pinning should
+        // mean that exact version, same as install modid@version does
+        let version = pin_version(version);
+
+        if VersionReq::parse(&version).is_err() {
             notice(
                 "The version string you tried to pin is invalid. \
-                 Valid operators are: <, <=, >, >=, =. \
-                 Wildcards (*) are supported for major, minor, or patch sections (e.g., '0.1.*', '0.*.0'), \
+                 Valid operators are: <, <=, >, >=, =, ~ \
+                 Wildcards (*) are supported as the trailing section (e.g., '0.1.*'), \
                  but they cannot be used if the version includes pre-release identifiers (e.g., '-rc', '-pre', '-alpha').",
                 Some(Color::Yellow),
                 vec![Attribute::Bold]
@@ -110,14 +118,23 @@ async fn set(args: &CommonArgs) {
             pkg.pinned_version = Some(version.clone());
         } else {
             config.pkg.push(Package {
-                mod_id: with_mod.clone(),
+                // store it lowercased, everything downstream keys off lowercase ids
+                mod_id: with_mod.to_lowercase(),
                 pinned_version: Some(version.clone()),
             });
         }
 
         save = true;
-        display_vec.push(command_output(format!("Pinned: {with_mod}"), version));
+        display_vec.push(command_output(format!("Pinned: {with_mod}"), &version));
         notice("Be sure to run the sync command to update Rustique's sync file to use the newly set pinned mod version.", Some(Color::Green), vec![]);
+    }
+
+    if let Some(jobs) = &args.jobs {
+        config.jobs = *jobs;
+        save = true;
+
+        let shown = if *jobs == 0 { "0 (no limit)".to_string() } else { jobs.to_string() };
+        display_vec.push(command_output("config.jobs", shown));
     }
 
     if let Some(val) = &args.show_execution_time {
@@ -197,7 +214,9 @@ async fn set(args: &CommonArgs) {
     }
 
     if save {
-        config.save(None).unwrap();
+        if let Err(e) = config.save(None) {
+            error!("Could not write your config file: {e}");
+        }
     }
 }
 
@@ -253,12 +272,12 @@ async fn del(args: &DelArgs) {
 
     if args.pinned_mod.is_some() {
         let Some(mod_id) = &args.pinned_mod else {
-                warn!("You must provide a Mod ID before anything can be removed. Run [./Rustique config list] to show all valid options");
+                warn!("You must provide a Mod ID before anything can be removed. Run [./rustique config list] to show all valid options");
                 exit(1);
             };
 
         if !config.pkg.is_empty() {
-            config.pkg.retain(|p| p.mod_id != *mod_id);
+            config.pkg.retain(|p| !p.mod_id.eq_ignore_ascii_case(mod_id));
             save = true;
             display_vec.push(command_output("Removed pinned version from: ", mod_id));
         }
@@ -290,6 +309,12 @@ async fn del(args: &DelArgs) {
         }
     }
     
+    if args.jobs {
+        config.jobs = defaults.jobs;
+        save = true;
+        display_vec.push(command_output("config.jobs", defaults.jobs.to_string()));
+    }
+
     if args.check_for_updates {
         config.check_for_updates = true;
         save = true;
@@ -301,7 +326,9 @@ async fn del(args: &DelArgs) {
     }
     
     if save {
-        config.save(None).unwrap();
+        if let Err(e) = config.save(None) {
+            error!("Could not write your config file: {e}");
+        }
     }
 }
 
@@ -313,6 +340,7 @@ async fn list() {
         command_output("config.game_download_dir",       &config.game_download_dir),
         command_output("config.backup_mods",             config.backup_mods.to_string()),
         command_output("config.show_execution_time",     config.show_execution_time.to_string()),
+        command_output("config.jobs",                    config.jobs.to_string()),
         command_output("config.notify_of_unzipped_mods", config.notify_of_unzipped_mods.to_string()),
         command_output("config.pinned_game_version",     &config.pinned_game_version),
         command_output("config.allow_unstable",          config.allow_unstable.to_string()),
@@ -332,7 +360,7 @@ async fn list() {
 
     if !config.pkg.is_empty() {
         let mut table = Table::new();
-        table.load_preset(UTF8_FULL_CONDENSED).apply_modifier(UTF8_ROUND_CORNERS).set_content_arrangement(ContentArrangement::Dynamic);
+        table.load_style(UTF8_FULL_CONDENSED.with_rounded_corners()).set_content_arrangement(ContentArrangement::Dynamic);
         let headers = vec![
             prep_cell("Mod ID", Some(CellColor::Green), Some(CellAttr::Bold), None, None),
             prep_cell("Pinned Version", Some(CellColor::Green), Some(CellAttr::Bold), None, Some(CellAlignment::Right)),

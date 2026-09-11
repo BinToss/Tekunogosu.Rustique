@@ -6,9 +6,8 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::{PathBuf};
 use std::time::Instant;
 use tracing::debug;
-use tracing::span::Attributes;
-use rustique_core::config::config_manager::get_config;
-use rustique_core::information_utils::{display_installation_results, elapsed_footer, notice};
+use rustique_core::config::config_manager::with_config;
+use rustique_core::information_utils::{display_incompatible_mods_constraint, display_installation_results, elapsed_footer, notice};
 use rustique_core::sync_structs::ModSyncInfo;
 use rustique_core::traits::ref_ext::PathRef;
 use rustique_core::install_manager::{install_manager, Install, Installed};
@@ -20,11 +19,21 @@ use rustique_core::aliases::ModID;
 pub async fn update_mods<V: AsRef<[ModID]>>(mod_dir: impl PathRef, update_mod_ids: V, keep_old_files: bool) -> Result<(), RustiqueError> {
     let (mod_dir, update_mod_ids) = (mod_dir.as_ref(), update_mod_ids.as_ref());
     let start_time = Instant::now();
-    let config = get_config().read().await;
+    // get_sync_data and install_manager both take their own read guard, don't hold one over them
+    let (backup_mods, show_execution_time) = with_config(|c| (c.backup_mods, c.show_execution_time)).await;
     let sync_data = get_sync_data(&PathBuf::from(mod_dir), false).await?;
     
     notice("Updating mods...", Option::from(Color::Yellow), vec![Attribute::Bold]);
-    // filter out anything that is a symlink. This means it's a modpack file we don't want to update. 
+
+    // everything physically in the mod dir, symlinks included. resolve_dependencies needs the whole
+    // picture or it re-downloads deps that are already sitting right there. A modpack symlink
+    // satisfies a dependency just as well as a real file does, so it stays in this set
+    let installed_mods: BTreeMap<ModID, ModSyncInfo> = sync_data.rustique_sync
+        .iter()
+        .map(|(mod_id, sync_info)| (split_modid_version(mod_id).0, sync_info.clone()))
+        .collect();
+
+    // filter out anything that is a symlink. This means it's a modpack file we don't want to update.
     let sync_data = sync_data.rustique_sync
         .into_iter()// Consume and transform
         .filter_map(|(mod_id,sync_info)| {
@@ -62,16 +71,27 @@ pub async fn update_mods<V: AsRef<[ModID]>>(mod_dir: impl PathRef, update_mod_id
         return Err(RustiqueError::SimpleError(String::from("No valid update ids or the mod dir is empty..\n\r")))
     }
 
-    let all_installed_mods: BTreeMap<ModID, ModSyncInfo> = mods_to_check_update.clone();
-    debug!("all_installed_mods: {:#?}", all_installed_mods);
+    debug!("installed_mods: {:#?}", installed_mods);
+
+    // mods sync couldn't get version info for. Left alone they compare "" against the installed
+    // version, look like an update is waiting every run, and fail on an empty download url
+    let mut no_version_info: Vec<String> = Vec::new();
 
     let final_mod_update_list: Vec<Install> = mods_to_check_update
         .into_iter()
         .filter_map(|(mod_id, mod_sync_info)| {
-           
+
+            if mod_sync_info.latest_known_version.is_empty() {
+                if !mod_id.is_empty() {
+                    no_version_info.push(format!("{mod_id}\nNo version information from the last sync. It may no longer be on the mod site, or nothing matches your pinned constraints."));
+                }
+
+                return None;
+            }
+
             // if mod_id is present in the [[pkg]] section of the config, check if we are allowed to update the mod
-            if mod_sync_info.latest_known_version != mod_sync_info.installed_version 
-                && !mod_id.is_empty() { 
+            if mod_sync_info.latest_known_version != mod_sync_info.installed_version
+                && !mod_id.is_empty() {
                 Some(Install { 
                     mod_id: mod_id.to_lowercase(),
                     mod_name: mod_sync_info.mod_name.clone(),
@@ -86,11 +106,15 @@ pub async fn update_mods<V: AsRef<[ModID]>>(mod_dir: impl PathRef, update_mod_id
 
     debug!("final_mod_update_list: {:#?}", final_mod_update_list);
 
+    if !no_version_info.is_empty() {
+        display_incompatible_mods_constraint(no_version_info, "Skipped, no version information".into());
+    }
 
-    let mods_processed: Vec<Installed> = install_manager(mod_dir, final_mod_update_list.clone(), all_installed_mods).await?;
+
+    let mods_processed: Vec<Installed> = install_manager(mod_dir, final_mod_update_list, installed_mods, false).await?;
     
-    if config.backup_mods {
-        backup_older_files(&mods_processed).await?;        
+    if backup_mods {
+        backup_older_files(&mods_processed).await?;
     }
     
     if !keep_old_files {
@@ -100,7 +124,7 @@ pub async fn update_mods<V: AsRef<[ModID]>>(mod_dir: impl PathRef, update_mod_id
     display_installation_results(mods_processed);
 
 
-    if config.show_execution_time {
+    if show_execution_time {
         elapsed_footer(start_time, "Update");
     }
 

@@ -9,7 +9,7 @@ use is_elevated::is_elevated;
 #[cfg(windows)]
 use std::process::exit;
 use rustique_core::aliases::{FileName, ModID};
-use rustique_core::config::config_manager::get_config;
+use rustique_core::config::config_manager::with_config;
 use rustique_core::information_utils::{display_table, notice, CellData};
 use rustique_core::rustique_errors::RustiqueError;
 use rustique_core::symlink_manager::SymlinkManager;
@@ -25,8 +25,12 @@ pub async fn mp_enable(mpk_id: ModID, mod_dir: impl PathRef, force: bool) -> Res
         exit(1);
     }
     
-    let config = get_config().read().await;
-    let mod_pack_install_dir = Path::new(&config.modpacks.modpack_dir).join("installed");
+    // extract_all_mods_metadata takes its own read guard below, don't hold one across it
+    let (modpack_dir, enabled_packs, disabled_packs) = with_config(|c| {
+        (c.modpacks.modpack_dir.clone(), c.modpacks.enabled.clone(), c.modpacks.disabled.clone())
+    }).await;
+
+    let mod_pack_install_dir = Path::new(&modpack_dir).join("installed");
     let full_dir_with_mpk_id = mod_pack_install_dir.join(&mpk_id);
     
     if !full_dir_with_mpk_id.exists() {
@@ -37,27 +41,27 @@ pub async fn mp_enable(mpk_id: ModID, mod_dir: impl PathRef, force: bool) -> Res
     // if so, notify the user and tell them to either disable the current one OR use modpack enable -f to force the use and warn about using multiple
     
     // Is it already enabled?
-    if config.modpacks.enabled.contains(&mpk_id) {
+    if enabled_packs.contains(&mpk_id) {
         notice(format!("Modpack: [{}] is already enabled. Did you mean to disable it?", &mpk_id), Some(Color::Yellow), vec![Attribute::Bold]);
         return Err(RustiqueError::SimpleError("Modpack already enabled".into()));
     }
     
     // Is it even installed??
-    if !config.modpacks.disabled.contains(&mpk_id) {
+    if !disabled_packs.contains(&mpk_id) {
         notice(format!("Modpack: [{}] is not installed! Use [Rustique modpack install {}] to install it first.", &mpk_id, &mpk_id), Some(Color::Yellow), vec![Attribute::Bold]);
         return Err(RustiqueError::SimpleError("Modpack needs to be installed first".into()))
     }
     
     // Is anything else enabled?
-    if !config.modpacks.enabled.is_empty() && !force {
+    if !enabled_packs.is_empty() && !force {
         
         display_table(vec![
             (CellData::new("You already have the following modpack(s) enabled: ".into(), Some(Color::Yellow), vec![], None),
-            CellData::new(config.modpacks.enabled.join(","), Some(Color::Magenta), vec![], None))
+            CellData::new(enabled_packs.join(","), Some(Color::Magenta), vec![], None))
         ], Some(UTF8_HORIZONTAL_ONLY));
         
         notice("Run this command again with --force to enable it anyway..", Some(Color::Yellow), vec![]);
-        return Err(RustiqueError::SimpleError(format!("Modpacks already enabled {}", config.modpacks.enabled.join(","))));
+        return Err(RustiqueError::SimpleError(format!("Modpacks already enabled {}", enabled_packs.join(","))));
         
     }
     

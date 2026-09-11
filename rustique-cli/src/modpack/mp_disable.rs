@@ -9,7 +9,7 @@ use is_elevated::is_elevated;
 #[cfg(windows)]
 use std::process::exit;
 use rustique_core::aliases::{FileName, ModID};
-use rustique_core::config::config_manager::get_config;
+use rustique_core::config::config_manager::with_config;
 use rustique_core::information_utils::notice;
 use rustique_core::rustique_errors::RustiqueError;
 use rustique_core::symlink_manager::SymlinkManager;
@@ -25,15 +25,16 @@ pub async fn mp_disable(mpk_id: ModID, mod_dir: impl PathRef) -> Result<ModID, R
     }
     
    
-    let config = get_config().read().await;
-    
-    let mod_pack_dir = Path::new(&config.modpacks.modpack_dir).join("installed").join(&mpk_id);
+    // extract_all_mods_metadata takes its own read guard below, don't hold one across it
+    let (mpk_root, enabled_packs) = with_config(|c| (c.modpacks.modpack_dir.clone(), c.modpacks.enabled.clone())).await;
+
+    let mod_pack_dir = Path::new(&mpk_root).join("installed").join(&mpk_id);
     
     if !mod_pack_dir.exists() {
         return Err(RustiqueError::SimpleError("Modpack {} doesn't exist. Run 'Rustique modpack list' to view installed modpacks.".into()));
     }
     
-    if !config.modpacks.enabled.contains(&mpk_id) {
+    if !enabled_packs.contains(&mpk_id) {
         notice(format!("The requested modpack [{}] is not enabled, or you misstyped the ID", &mpk_id), Some(Color::Yellow), vec![Attribute::Bold]);
         return Err(RustiqueError::SimpleError("Modpack is not enabled".into()));
     }

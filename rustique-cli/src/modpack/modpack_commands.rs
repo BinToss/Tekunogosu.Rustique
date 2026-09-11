@@ -4,7 +4,7 @@ use comfy_table::{Attribute, Color};
 use comfy_table::presets::UTF8_HORIZONTAL_ONLY;
 use tracing::{error, info, warn};
 use owo_colors::OwoColorize;
-use rustique_core::config::config_manager::get_config;
+use rustique_core::config::config_manager::{get_config, with_config};
 use rustique_core::information_utils::{command_output, display_table, notice};
 use rustique_core::traits::ref_ext::PathRef;
 use crate::commands::arg_structs::modpack_args::{MPLocalSubCommands, ModpackCommands, ModpackSubCommands};
@@ -46,7 +46,9 @@ pub async fn parse_modpack_commands(commands: &ModpackCommands, mod_dir: impl Pa
                     // do config write things
                     let mut config = get_config().write().await;
                     config.modpacks.disabled.retain(|m| m != &mpk_id);
-                    config.save(None).unwrap();
+                    if let Err(e) = config.save(None) {
+                        error!("Could not write your config file: {e}");
+                    }
                     
                     notice(format!("{mpk_id} has been deleted successfully!"), Some(Color::Green), vec![Attribute::Bold]);
                 }
@@ -89,16 +91,24 @@ pub async fn parse_modpack_commands(commands: &ModpackCommands, mod_dir: impl Pa
            
         }
         ModpackSubCommands::Enable(args) => {
-            match mp_enable(args.mpk_id.clone(), mod_dir, args.force).await {
+            match mp_enable(args.mpk_id.clone(), &mod_dir, args.force).await {
                 Ok(enabled_pack) => {
-                    let mut config = get_config().write().await;
-                    config.modpacks.enabled.push(enabled_pack.clone());
-                    config.modpacks.disabled.retain(|e| !e.eq_ignore_ascii_case(&enabled_pack));
-                    match config.save(None) {
+                    // scope the write guard, handle_sync_call takes a read one of its own below
+                    let saved = {
+                        let mut config = get_config().write().await;
+                        config.modpacks.enabled.push(enabled_pack.clone());
+                        config.modpacks.disabled.retain(|e| !e.eq_ignore_ascii_case(&enabled_pack));
+                        config.save(None)
+                    };
+
+                    match saved {
                         Ok(()) => {
                             notice(format!("Modpack: [{enabled_pack}] has been enabled!"), Some(Color::Green), vec![Attribute::Bold]);
+                            // the symlinks only just appeared, the mod dir sync file has no idea
+                            // they exist yet and everything depending on them would read as missing
+                            handle_sync_call(&mod_dir, false).await;
                         }
-                        Err(e) => { 
+                        Err(e) => {
                             // If we fail to save, we should remove the symlinks
                             error!("{}", e.to_string().red().bold());
                         }
@@ -110,17 +120,24 @@ pub async fn parse_modpack_commands(commands: &ModpackCommands, mod_dir: impl Pa
             }
         }
         ModpackSubCommands::Disable(args) => {
-            match mp_disable(args.mpk_id.clone(), mod_dir).await {
+            match mp_disable(args.mpk_id.clone(), &mod_dir).await {
                 Ok(disabled_pack) => {
-                    let mut config = get_config().write().await;
-                    config.modpacks.enabled.retain(|m| !m.eq_ignore_ascii_case(&disabled_pack));
-                    config.modpacks.disabled.push(disabled_pack.clone());
-                    match config.save(None) {
+                    // scope the write guard, handle_sync_call takes a read one of its own below
+                    let saved = {
+                        let mut config = get_config().write().await;
+                        config.modpacks.enabled.retain(|m| !m.eq_ignore_ascii_case(&disabled_pack));
+                        config.modpacks.disabled.push(disabled_pack.clone());
+                        config.save(None)
+                    };
+
+                    match saved {
                         Ok(()) => {
-                           notice(format!("Modpack: [{disabled_pack}] has been disabled!"), Some(Color::Green), vec![Attribute::Bold]); 
-                        } 
+                           notice(format!("Modpack: [{disabled_pack}] has been disabled!"), Some(Color::Green), vec![Attribute::Bold]);
+                           // the symlinks are gone now, get them back out of the sync file
+                           handle_sync_call(&mod_dir, false).await;
+                        }
                         Err(e) => {
-                           error!("{}", e.to_string().red().bold()); 
+                           error!("{}", e.to_string().red().bold());
                         }
                     }
                 }
@@ -130,8 +147,9 @@ pub async fn parse_modpack_commands(commands: &ModpackCommands, mod_dir: impl Pa
             }
         }
         ModpackSubCommands::List(args) => {
-            let config = get_config().read().await;
-            let packs_path = Path::new(&config.modpacks.modpack_dir).join("packs");
+            // cmd_list takes its own read guard, don't hold one across it
+            let modpack_dir = with_config(|c| c.modpacks.modpack_dir.clone()).await;
+            let packs_path = Path::new(&modpack_dir).join("packs");
             match cmd_list(&packs_path, args.updates, false, true, false, args.export_args.columns.clone(), args.export_args.export_as.clone(), args.export_args.file_path.clone()).await {
                 Ok(()) => {}
                 Err(e) => {
@@ -157,8 +175,9 @@ pub async fn parse_modpack_commands(commands: &ModpackCommands, mod_dir: impl Pa
             }
         }
         ModpackSubCommands::Sync => {
-            let config = get_config().read().await;
-            let mp_dir = Path::new(&config.modpacks.modpack_dir).join("packs");
+            // handle_sync_call takes its own read guard, don't hold one across it
+            let modpack_dir = with_config(|c| c.modpacks.modpack_dir.clone()).await;
+            let mp_dir = Path::new(&modpack_dir).join("packs");
 
             handle_sync_call(&mp_dir, false).await;
         }
@@ -166,9 +185,10 @@ pub async fn parse_modpack_commands(commands: &ModpackCommands, mod_dir: impl Pa
         ModpackSubCommands::Local(args) => {
             match &args.subcommands {
                 MPLocalSubCommands::List(largs) => {
-                    let config = get_config().read().await;
-                    let packs_path = Path::new(&config.modpacks.modpack_dir).join("mypacks");
-                    
+                    // cmd_list takes its own read guard, don't hold one across it
+                    let modpack_dir = with_config(|c| c.modpacks.modpack_dir.clone()).await;
+                    let packs_path = Path::new(&modpack_dir).join("mypacks");
+
                     match cmd_list(&packs_path,false, false, true, true, largs.output_commands.columns.clone(), largs.output_commands.export_as.clone(), largs.output_commands.file_path.clone()).await {
                         Ok(()) => {}
                         Err(e) => {

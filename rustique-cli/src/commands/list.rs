@@ -8,7 +8,6 @@ use rustique_core::rustique_errors::RustiqueError;
 use rustique_core::utils::{extract_all_mods_metadata, gather_dependencies, gather_missing_dependencies, split_modid_version, sanitize_string, format_for_csv, html_parse};
 use rustique_core::version_management::parse_version;
 use owo_colors::OwoColorize;
-use comfy_table::modifiers::UTF8_ROUND_CORNERS;
 use comfy_table::presets::UTF8_FULL;
 use comfy_table::{Cell, CellAlignment, ContentArrangement, Row, Table};
 use std::str::FromStr;
@@ -54,8 +53,7 @@ pub async fn cmd_list(
 
     // setup headers
     let mut table = Table::new();
-    table.load_preset(UTF8_FULL)
-        .apply_modifier(UTF8_ROUND_CORNERS)
+    table.load_style(UTF8_FULL.with_rounded_corners())
         .set_content_arrangement(ContentArrangement::Dynamic);
 
     // if fields set the columns from that
@@ -187,7 +185,7 @@ pub async fn cmd_list(
             
             let file_is_symlink = mod_dir.join(filename).is_symlink();
            
-            let pkg = config.pkg.iter().find(|p| p.mod_id.eq(&mod_info.mod_id));
+            let pkg = config.pkg.iter().find(|p| p.mod_id.eq_ignore_ascii_case(&mod_info.mod_id));
 
             if only_pinned && pkg.is_none() {
                 return None
@@ -244,8 +242,13 @@ pub async fn cmd_list(
                         Some(prep_cell(txt + &mid, the_color, attr, None, None))
                     },
                     Ok(ListColumn::Version) => {
-                        let txt = parse_version(&mod_info.version.clone().unwrap_or_default()).unwrap().to_string();
-                        Some(prep_cell(txt.to_string(), color, attr, None, Some(CellAlignment::Right)))
+                        // a version we can't parse is still worth showing. An empty or non
+                        // numeric one used to panic here and take the whole listing down,
+                        // sync has always just warned and carried the raw string through
+                        let raw = mod_info.version.clone().unwrap_or_default();
+                        let txt = parse_version(&raw).map_or(raw, |parsed| parsed.to_string());
+
+                        Some(prep_cell(txt, color, attr, None, Some(CellAlignment::Right)))
                     },
                     Ok(ListColumn::LatestVersion) => {
                         // No need to show LatestVersion for local modpack, they are always the latest version
@@ -401,10 +404,18 @@ pub async fn cmd_list(
         println!("{table}");
         print!("{} {}", "Total Mod Count:".bright_green().bold().on_black(), installed_mods.len().to_string().bright_purple().on_black());
 
+        // only worth a mention when they've actually set one
+        if !config.pinned_game_version.is_empty() {
+            print!(" - {}: {}", "Pinned Game Version".bright_green().bold().on_black(), config.pinned_game_version.bright_purple().on_black());
+        }
+
         if config.show_execution_time {
             let elapsed = format!("{:.2}", start_time.elapsed().as_secs_f64());
-            println!(" - {}: {}{}","List operation took".bright_green().bold().on_black(), elapsed.bright_purple().on_black(), "s".bright_yellow().on_black());
+            print!(" - {}: {}{}","List operation took".bright_green().bold().on_black(), elapsed.bright_purple().on_black(), "s".bright_yellow().on_black());
         }
+
+        // the footer is built up with print!, so it needs closing off here or the line never ends
+        println!();
     }
 
     Ok(())

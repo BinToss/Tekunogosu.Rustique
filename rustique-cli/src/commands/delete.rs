@@ -1,25 +1,26 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use comfy_table::{CellAlignment, Color};
+use comfy_table::{Attribute, CellAlignment, Color};
 use comfy_table::presets::UTF8_BORDERS_ONLY;
 use tokio::fs::ReadDir;
 use tracing::{info, warn};
 use rustique_core::aliases::{ModFileName, ModID, ModVersion};
+use rustique_core::api::api_structs::ModInfo;
 use crate::commands::arg_structs::delete_args::DeleteArgAllVals;
 use crate::commands::sync::get_sync_data;
-use rustique_core::config::config_manager::get_config;
+use rustique_core::config::config_manager::with_config;
 use rustique_core::consts::FILE_RUSTIQUE_SYNC;
-use rustique_core::information_utils::{display_table, CellData};
+use rustique_core::information_utils::{display_table, notice, CellData};
 use rustique_core::symlink_manager::SymlinkManager;
 use rustique_core::rustique_errors::RustiqueError;
 use rustique_core::traits::ref_ext::PathRef;
-use rustique_core::utils::{delete_file, extract_all_mods_metadata, split_modid_version};
-use rustique_core::version_management::parse_version;
+use rustique_core::utils::{delete_file, extract_all_mods_metadata, is_base_game_dep, split_modid_version};
+use rustique_core::version_management::compare_versions;
 
 pub async fn delete_all(mod_dir: impl PathRef, delete_type: &DeleteArgAllVals) -> Result<(), RustiqueError> {
-    
-    let config = get_config().read().await;
-    
+
+    let backup_mods_dir = with_config(|c| c.backup_mods_dir.clone()).await;
+
    
     // location_type: Mods looks at the folder specified by mod_dir
     // location_type: Backups looks at the backup dir in the config
@@ -38,7 +39,7 @@ pub async fn delete_all(mod_dir: impl PathRef, delete_type: &DeleteArgAllVals) -
     
     if matches!(delete_type, DeleteArgAllVals::Backups) || matches!(delete_type, DeleteArgAllVals::Both) {
        
-        let mut mods = tokio::fs::read_dir(Path::new(&config.backup_mods_dir)).await?;
+        let mut mods = tokio::fs::read_dir(Path::new(&backup_mods_dir)).await?;
         iterate_and_delete(&mut mods, &mut cleaned_mods).await?;
     }
     
@@ -81,76 +82,187 @@ pub async fn iterate_and_move_zip(curr_items: &mut ReadDir, target_dir: impl Pat
     Ok(())
 }
 
-pub async fn delete_cmd(mod_dir: impl PathRef, mod_ids: Vec<ModID>, is_backup: bool) -> Result<(), RustiqueError> {
+/// The dependency ids a mod declares, lowercased, minus the base game pseudo deps
+fn dep_ids(modinfo: &ModInfo) -> impl Iterator<Item = ModID> + '_ {
+    modinfo.dependencies
+        .keys()
+        .filter(|dep_id| !is_base_game_dep(dep_id))
+        .map(|dep_id| dep_id.to_lowercase())
+}
+
+/// Removes dependencies the deleted mods brought along, as long as nothing still installed asks
+/// for them. Loops until it stops finding any, so a chain of A needs B needs C clears in one go.
+///
+/// Anything it deletes gets pushed onto processed_mods so the sync file pruning picks it up too.
+/// Symlinks never reach here, all_metadata is already gathered without them. A modpack carries
+/// its own copies of what it needs, so nothing in the mods dir is holding it up.
+async fn remove_orphaned_deps(
+    mod_dir: &Path,
+    all_metadata: &HashMap<ModFileName, ModInfo>,
+    processed_mods: &mut Vec<(ModID, ModVersion, ModFileName)>,
+) -> Vec<String> {
+    let mut removed: Vec<String> = Vec::new();
+    let mut failed: HashSet<ModFileName> = HashSet::new();
+
+    // only things the mods we deleted were actually asking for are eligible to go
+    let mut candidates: HashSet<ModID> = processed_mods
+        .iter()
+        .filter_map(|(_, _, filename)| all_metadata.get(filename))
+        .flat_map(dep_ids)
+        .collect();
+
+    loop {
+        let deleted_files: HashSet<&ModFileName> = processed_mods.iter().map(|(_, _, f)| f).collect();
+
+        // anything a mod that's staying still depends on is off limits
+        let still_needed: HashSet<ModID> = all_metadata
+            .iter()
+            .filter(|(filename, _)| !deleted_files.contains(filename))
+            .flat_map(|(_, modinfo)| modinfo.dependencies.keys())
+            .map(|dep_id| dep_id.to_lowercase())
+            .collect();
+
+        let orphans: Vec<(ModFileName, ModInfo)> = all_metadata
+            .iter()
+            .filter(|(filename, modinfo)| {
+                let mod_id = modinfo.mod_id.to_lowercase();
+
+                !deleted_files.contains(filename)
+                    && !failed.contains(*filename)
+                    && candidates.contains(&mod_id)
+                    && !still_needed.contains(&mod_id)
+            })
+            .map(|(filename, modinfo)| (filename.clone(), modinfo.clone()))
+            .collect();
+
+        if orphans.is_empty() {
+            break;
+        }
+
+        for (filename, modinfo) in orphans {
+            let mod_id = modinfo.mod_id.to_lowercase();
+            let version = modinfo.version.clone().unwrap_or("0.0.0".into());
+
+            match delete_file(mod_dir.join(&filename)).await {
+                Ok(()) => {
+                    removed.push(format!("{mod_id}@{version}"));
+                    // whatever this one pulled in might have just been orphaned as well
+                    candidates.extend(dep_ids(&modinfo));
+                    processed_mods.push((mod_id, version, filename));
+                }
+                Err(e) => {
+                    warn!("Failed to delete dependency {}: {}", filename, e);
+                    // remember it or the next pass finds it again and we never finish
+                    failed.insert(filename);
+                }
+            }
+        }
+    }
+
+    removed
+}
+
+pub async fn delete_cmd(mod_dir: impl PathRef, mod_ids: Vec<ModID>, is_backup: bool, with_deps: bool) -> Result<(), RustiqueError> {
     
-    let config = get_config().read().await;
-   
-    let mut mod_lookup: HashMap<ModID, Option<ModVersion>> = mod_ids.iter().map(split_modid_version).collect();
-   
+    // get_sync_data takes its own read guard further down, don't still be holding one
+    let backup_mods_dir = with_config(|c| c.backup_mods_dir.clone()).await;
+
+    let mod_lookup: HashMap<ModID, Option<ModVersion>> = mod_ids.iter().map(split_modid_version).collect();
+
     info!("mod_lookup {:?}", mod_lookup);
-    
+
     let mod_dir = if is_backup {
-        Path::new(&config.backup_mods_dir)
+        Path::new(&backup_mods_dir)
     } else {
         mod_dir.as_ref()
     };
     
     // grab only the real mods in the m_dir, ignoring the symlinks (modpacks)
     let all_metadata  = extract_all_mods_metadata(mod_dir, true).await?;
-    let mut processed_mods: Vec<(ModID, ModFileName)> = Vec::new();
-   
-    for (filename, modinfo) in all_metadata {
-        if let Some((_, target_version)) = mod_lookup.remove_entry(&modinfo.mod_id) {
-            info!("target_version: {:?}", target_version);
-            
-            let should_delete = match &target_version {
-                Some(required_version) => {
-                    let required = parse_version(required_version)?;
-                    let current = parse_version(&modinfo.version.clone().unwrap_or("0.0.0".into()))?;
-                    info!("DELETE: Comparing versions: {} == {}", required, current);
-                    required == current
-                }
-                None => true,
-            };
-            
-            if should_delete {
-                processed_mods.push((format!("{}@{}", modinfo.mod_id, modinfo.version.unwrap_or(String::new())), filename.clone()));
-                delete_file(mod_dir.join(&filename)).await?;
-            } else {
-                warn!("{:?}@{:?} not found", modinfo.mod_id, target_version);
+    let mut processed_mods: Vec<(ModID, ModVersion, ModFileName)> = Vec::new();
+
+    for (filename, modinfo) in &all_metadata {
+        // modinfo.json ids come in whatever case the author felt like, mod_lookup is already lowercased
+        let mod_id = modinfo.mod_id.to_lowercase();
+        let Some(target_version) = mod_lookup.get(&mod_id) else {
+            continue;
+        };
+
+        info!("target_version: {:?}", target_version);
+
+        let installed_version = modinfo.version.clone().unwrap_or("0.0.0".into());
+
+        // no version means every copy of this mod goes. split_modid_version already turned a
+        // bare 1.2.3 into =1.2.3 so a plain version is an exact match, ranges still work
+        let should_delete = match target_version {
+            // a mod whose version won't parse just isn't a match, no reason to kill the whole command over it
+            Some(required_version) => compare_versions(required_version, &installed_version).unwrap_or_else(|e| {
+                warn!("Can't compare {} against {} for {}: {}", installed_version, required_version, mod_id, e);
+                false
+            }),
+            None => true,
+        };
+
+        if should_delete {
+            // one bad file shouldn't abort the whole command and leave the sync file unwritten
+            match delete_file(mod_dir.join(filename)).await {
+                Ok(()) => processed_mods.push((mod_id, installed_version, filename.clone())),
+                Err(e) => warn!("Failed to delete {}: {}", filename, e),
             }
-        } 
+        } else {
+            info!("Skipping {} {}, doesn't match {:?}", mod_id, installed_version, target_version);
+        }
     }
     
+    // opt in only. Rustique can't tell a library mod from a content mod, and plenty of content
+    // mods are depended on by others, so sweeping deps out by default would take them with it.
+    // Backups aren't loaded by the game so dependencies between them mean nothing
+    if with_deps && !is_backup && !processed_mods.is_empty() {
+        let orphaned = remove_orphaned_deps(mod_dir, &all_metadata, &mut processed_mods).await;
+
+        if !orphaned.is_empty() {
+            notice(
+                format!("Also removed dependencies nothing else needed: [{}]", orphaned.join("], [")),
+                Some(Color::Yellow),
+                vec![Attribute::Bold],
+            );
+        }
+    }
+
     if !processed_mods.is_empty() {
         // get sync data and remove all the processed_mods from it. (this saves having to sync again)
         let mut sync_data = get_sync_data(&mod_dir, true).await?;
+        let deleted_files: HashSet<&ModFileName> = processed_mods.iter().map(|(_, _, f)| f).collect();
 
-        for pm in &processed_mods {
-            let (mod_id, version) = split_modid_version(&pm.0);
+        // only drop a mod from the sync file once every copy of it is gone. Deleting one version
+        // out of two leaves the other one installed and it still belongs in there
+        for (mod_id, _, _) in &processed_mods {
+            let still_installed = all_metadata.iter().any(|(filename, modinfo)| {
+                modinfo.mod_id.to_lowercase().eq(mod_id) && !deleted_files.contains(filename)
+            });
 
-            if let Some(rem_data) = sync_data.rustique_sync.remove(&mod_id) {
-                if rem_data.installed_version != version.unwrap_or(String::new()) {
-                    // value didn't match, put the entry back into the sync file.
-                    // Sync file will only have the latest version, so this prob means it was on old version that was removed.
-                    sync_data.rustique_sync.insert(mod_id, rem_data);
-                }
+            if !still_installed {
+                sync_data.rustique_sync.remove(mod_id);
             }
-
         }
 
         // save the file from the passed mod_dir (which could be from the config file or the cli)
         sync_data.save(Path::new(mod_dir).join(FILE_RUSTIQUE_SYNC)).await?;
     }
-    
-    let removed = processed_mods.iter().map(|m|format!("{}:{}",m.0, m.1)).collect::<Vec<String>>().join("], [");
+
+    let removed = processed_mods.iter().map(|(mod_id, version, filename)| format!("{mod_id}@{version}:{filename}")).collect::<Vec<String>>().join("], [");
 
     show_deleted(&removed);
 
-    if !mod_lookup.is_empty() {
-        info!("Unable to find {:?}", mod_lookup);
+    // anything asked for that we didn't actually delete, either it isn't installed or the
+    // version they asked for isn't the one sitting there
+    let deleted_ids: HashSet<&ModID> = processed_mods.iter().map(|(id, _, _)| id).collect();
+    let not_deleted: Vec<&ModID> = mod_lookup.keys().filter(|id| !deleted_ids.contains(id)).collect();
+
+    if !not_deleted.is_empty() {
+        notice(format!("Nothing deleted for: [{}]. Check the modid and version with [Rustique list]", not_deleted.iter().map(|id| id.as_str()).collect::<Vec<&str>>().join("], [")), Some(Color::Yellow), vec![Attribute::Bold]);
     }
-    
+
     Ok(())
 }
 

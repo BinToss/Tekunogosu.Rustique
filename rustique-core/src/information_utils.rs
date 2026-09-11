@@ -1,8 +1,9 @@
 use std::time::Instant;
 use comfy_table::{Attribute, Cell, CellAlignment, Color, ContentArrangement, Row, Table};
 use comfy_table::ContentArrangement::Dynamic;
-use comfy_table::modifiers::UTF8_ROUND_CORNERS;
+
 use comfy_table::presets::{UTF8_BORDERS_ONLY, UTF8_FULL_CONDENSED, UTF8_HORIZONTAL_ONLY};
+use comfy_table::TableStyle;
 use crate::config::config_structs::{CellAttr, CellColor};
 use crate::install_manager::Installed;
 use crate::traits::ref_ext::StrRef;
@@ -12,17 +13,39 @@ pub struct RustiqueMessage {
     pub message: Vec<CellData>
 }
 
+/// comfy_table measures a cell by the characters in it, so ansi colour codes baked into a string
+/// get counted toward the width and shove the right border out of line. Our errors colour
+/// themselves in their Display impl, and the cell sets its own colour anyway, so drop the codes.
+fn strip_ansi(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars();
+
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            // run to the end of the escape sequence and throw the lot away
+            for esc in chars.by_ref() {
+                if esc == 'm' {
+                    break;
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+
+    out
+}
+
 pub fn rustique_message(rustique_message: RustiqueMessage) {
     let mut table = Table::new();
-    table.load_preset(UTF8_BORDERS_ONLY)
-         .apply_modifier(UTF8_ROUND_CORNERS)
+    table.load_style(UTF8_BORDERS_ONLY.with_rounded_corners())
          .set_content_arrangement(Dynamic);
 
     if rustique_message.header.is_some() {
         let header_data = rustique_message.header;
         if header_data.is_some() {
             let header_data = header_data.unwrap_or_default();
-            let mut h_cell = Cell::new(header_data.text);
+            let mut h_cell = Cell::new(strip_ansi(&header_data.text));
             if !header_data.attributes.is_empty() {
                 h_cell = h_cell.add_attributes(header_data.attributes);
             }
@@ -37,7 +60,7 @@ pub fn rustique_message(rustique_message: RustiqueMessage) {
     }
 
     let rows: Vec<Row> = rustique_message.message.iter().map(|message_data|{
-        let mut cell = Cell::from(message_data.text.clone());
+        let mut cell = Cell::from(strip_ansi(&message_data.text));
 
         if !message_data.attributes.is_empty() {
             for attr in &message_data.attributes {
@@ -60,8 +83,7 @@ pub fn rustique_message(rustique_message: RustiqueMessage) {
 pub fn notice(message: impl StrRef, fg_color: Option<Color>, attributes: Vec<Attribute>) {
     let mut table = Table::new();
     table
-        .load_preset(UTF8_HORIZONTAL_ONLY)
-        .apply_modifier(UTF8_ROUND_CORNERS)
+        .load_style(UTF8_HORIZONTAL_ONLY.with_rounded_corners())
         .set_content_arrangement(Dynamic);
 
     let mut cell = Cell::new(message.as_ref());
@@ -120,7 +142,7 @@ pub fn display_installation_results(mods_processed: Vec<Installed>) {
     let (mut successful, mut failed): (Vec<Installed>, Vec<Installed>) = mods_processed.into_iter().partition(|m| m.success);
 
     let mut s_table = Table::new();
-    s_table.load_preset(UTF8_FULL_CONDENSED).apply_modifier(UTF8_ROUND_CORNERS);
+    s_table.load_style(UTF8_FULL_CONDENSED.with_rounded_corners());
     let mut f_table = s_table.clone();
 
 
@@ -167,10 +189,10 @@ pub fn command_output(option: impl StrRef, val: impl StrRef) -> (CellData, CellD
     )
 }
 
-pub fn display_table(row_data: Vec<(CellData, CellData)>, table_style: Option<&str>) {
+pub fn display_table(row_data: Vec<(CellData, CellData)>, table_style: Option<TableStyle>) {
     let style = table_style.unwrap_or(UTF8_BORDERS_ONLY);
     let mut table = Table::new();
-    table.load_preset(style).set_content_arrangement(ContentArrangement::Dynamic).apply_modifier(UTF8_ROUND_CORNERS);
+    table.load_style(style.with_rounded_corners()).set_content_arrangement(ContentArrangement::Dynamic);
 
     let mut rows: Vec<Row> = Vec::new();
 
@@ -213,8 +235,7 @@ impl CellData {
 pub fn elapsed_footer(start_time: Instant, operation: impl StrRef + std::fmt::Display) {
     let mut table = Table::new();
     table
-        .load_preset(UTF8_HORIZONTAL_ONLY)
-        .apply_modifier(UTF8_ROUND_CORNERS)
+        .load_style(UTF8_HORIZONTAL_ONLY.with_rounded_corners())
         .set_content_arrangement(Dynamic);
 
     let elapsed = format!("{:.2}s", start_time.elapsed().as_secs_f64());
@@ -237,8 +258,20 @@ pub fn display_incompatible_mods_constraint(incompatible_mods: Vec<String>, titl
             CellData::new(title,
                           Some(Color::Yellow), vec![Attribute::Bold], Some(CellAlignment::Center))
         ),
-        message: incompatible_mods.iter().map(|m| {
-            CellData::new(m.into(), Some(Color::Red), vec![], Some(CellAlignment::Left))
+        // each entry comes in as "<mod name>\n<why it failed>". Split them so the name gets a
+        // lighter colour of its own instead of disappearing into a wall of red
+        message: incompatible_mods.iter().flat_map(|m| {
+            let (mod_name, reason) = m.split_once('\n').unwrap_or((m.as_str(), ""));
+
+            let mut cells = vec![
+                CellData::new(mod_name.to_string(), Some(Color::Cyan), vec![Attribute::Bold], Some(CellAlignment::Left))
+            ];
+
+            if !reason.is_empty() {
+                cells.push(CellData::new(reason.to_string(), Some(Color::Red), vec![], Some(CellAlignment::Left)));
+            }
+
+            cells
         }).collect(),
     });
     println!();

@@ -96,6 +96,10 @@ pub struct CommonArgs {
     /// Default: true
     #[arg(short, long, action = ArgAction::Set, value_parser = clap::value_parser!(bool), value_name = "SHOW")]
     pub show_execution_time: Option<bool>,
+
+    /// How many mods to download at the same time. 0 removes the limit entirely
+    #[arg(short = 'j', long, value_name = "COUNT")]
+    pub jobs: Option<usize>,
     
     /// Specify mod options. Use --pin-version to pin a version. 
     #[arg(short, long, value_name = "MOD_ID")]
@@ -171,7 +175,11 @@ pub struct DelArgs {
 
     #[arg(short, long)]
     pub check_for_updates: bool,
-    
+
+    /// Set the default jobs back to default (15)
+    #[arg(short = 'j', long)]
+    pub jobs: bool,
+
     /// Specify a pinned mod. Use `Rustique config list` to see all set mods and their IDs
     #[arg(short = 'P', long, value_name = "MOD_ID")]
     pub pinned_mod: Option<ModID>,

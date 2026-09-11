@@ -31,7 +31,10 @@ impl RustiqueOptions {
                 mod_dir: Some(PathBuf::from(path).join("VintagestoryData").join("Mods")),
             }
         }
-        panic!("Unable to determine default mods directory");
+
+        // no APPDATA means we can't guess. Hand back nothing and let the cli say something
+        // useful about it, a library has no business killing the process
+        RustiqueOptions { mod_dir: None }
     }
 
     // As of 1.21-pre*, the default location for Mac has changed to
@@ -86,7 +89,9 @@ impl RustiqueOptions {
 
             return options
         }
-        panic!("Unable to determine user's home directory, do you have permissions??");
+
+        // no home directory to work from. Same as above, report nothing and let the cli handle it
+        RustiqueOptions { mod_dir: None }
     }
 
     // TODO: Finish mac migration to new config location
@@ -147,9 +152,10 @@ impl RustiqueOptions {
 
 
 
+            return options;
         }
 
-        panic!("Unable to determine default home directory");
+        RustiqueOptions { mod_dir: None }
     }
 
     pub async fn get_mod_path(&self) -> PathBuf {
